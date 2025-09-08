@@ -8,6 +8,8 @@ from PyQt6.QtGui import QFont, QFontDatabase, QPixmap, QColor, QPainter, QLinear
 from main import sndi
 import pygame
 import speech_recognition as sr
+from sndi.storage import resource_path 
+
 
 # ---------- helpers: fonts ----------
 def load_cyberpunk_font():
@@ -18,7 +20,8 @@ def load_cyberpunk_font():
         "assets/fonts/ShareTechMono-Regular.ttf",
     ]
     loaded_family = None
-    for path in candidates:
+    for rel in candidates:
+        path = resource_path(rel)  # <— ЗАМІНА
         if os.path.exists(path):
             fid = QFontDatabase.addApplicationFont(path)
             if fid != -1:
@@ -37,7 +40,8 @@ AVATAR_PATH_CANDIDATES = [
 
 def load_avatar_pixmap(target_h: int = 240) -> QPixmap:
     pix = QPixmap()
-    for p in AVATAR_PATH_CANDIDATES:
+    for rel in AVATAR_PATH_CANDIDATES:
+        p = resource_path(rel)  # <— ЗАМІНА
         if os.path.exists(p):
             pix = QPixmap(p)
             break
@@ -213,8 +217,8 @@ class ChatWindow(QWidget):
         self.dot_phase = 0
 
         pygame.mixer.init()
-        self.message_sound = pygame.mixer.Sound("assets/audio/cyberpunk_message.wav")
-        self.send_sound = pygame.mixer.Sound("assets/audio/send_sound.mp3")
+        self.message_sound = pygame.mixer.Sound(resource_path("assets/audio/cyberpunk_message.wav"))
+        self.send_sound = pygame.mixer.Sound(resource_path("assets/audio/send_sound.mp3"))
 
     # ---------- sidebar builder ----------
     def _build_sidebar(self) -> QFrame:
