@@ -1,11 +1,13 @@
 # main.py
 from dotenv import load_dotenv
 import os, re, traceback
+from typing import Optional, Callable
 from openai import OpenAI
 
 from sndi.config_loader import load_config
 from sndi.sanitize import sanitize
 from sndi.storage import load_json, save_json  # робота з %APPDATA%\SNDI
+from sndi.system_manager import SystemManager   # ← додано
 
 # --- конфіг + клієнт ---
 config = load_config()
@@ -60,8 +62,34 @@ def _append_history(user_text: str, assistant_text: str) -> None:
     hist.append({"role": "assistant", "content": assistant_text})
     save_json("history.json", hist)
 
+# ---------- колбеки підтвердження/логів для SystemManager ----------
+def _confirm(prompt: str) -> bool:
+    """
+    Консольне підтвердження небезпечних дій (shutdown/restart/kill тощо).
+    Якщо додаси GUI — підміниш ці колбеки у місці створення SystemManager.
+    """
+    try:
+        ans = input(f"[Підтвердження] {prompt} (y/n): ").strip().lower()
+        return ans.startswith("y")
+    except Exception:
+        return False
+
+def _log(msg: str) -> None:
+    """Простий лог у консоль. За потреби — прокинь у чат/GUI."""
+    print(f"[SYSTEM] {msg}")
+
+# Ініціалізація системного менеджера
+_system_mgr = SystemManager(confirm_cb=_confirm, log_cb=_log)
+
 # ---------- головна розмова ----------
 def sndi(user_text: str) -> str:
+    # 0) спроба обробити як системну інтенцію ПЕРЕД зверненням до моделі
+    handled, sys_resp = _system_mgr.dispatch(user_text)
+    if handled:
+        clean_sys = sanitize(sys_resp) or sys_resp or "ok."
+        _append_history(user_text, clean_sys)
+        return clean_sys
+
     # 1) оновимо профіль базовими фактами
     _maybe_update_profile(user_text)
 

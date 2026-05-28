@@ -1,14 +1,15 @@
 import sys, os, re, math, random
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QLineEdit,
-    QPushButton, QLabel, QFrame, QSizePolicy, QGraphicsDropShadowEffect, QSpacerItem
+    QPushButton, QLabel, QFrame, QSizePolicy, QGraphicsDropShadowEffect, QSpacerItem, QMessageBox
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QSize
 from PyQt6.QtGui import QFont, QFontDatabase, QPixmap, QColor, QPainter, QLinearGradient, QBrush
 from main import sndi
 import pygame
 import speech_recognition as sr
-from sndi.storage import resource_path 
+from sndi.storage import resource_path
+from sndi.system_manager import SystemManager
 
 
 # ---------- helpers: fonts ----------
@@ -220,6 +221,12 @@ class ChatWindow(QWidget):
         self.message_sound = pygame.mixer.Sound(resource_path("assets/audio/cyberpunk_message.wav"))
         self.send_sound = pygame.mixer.Sound(resource_path("assets/audio/send_sound.mp3"))
 
+        # ---- System Manager: UI-level routing + confirmations ----
+        self.system_mgr = SystemManager(
+            confirm_cb=self.confirm_dialog,
+            log_cb=self.append_system_log,
+        )
+
     # ---------- sidebar builder ----------
     def _build_sidebar(self) -> QFrame:
         side = QFrame()
@@ -270,6 +277,20 @@ class ChatWindow(QWidget):
         self.status_dot.setStyleSheet(
             f"border-radius:6px; background:{'#29fca5' if online else '#ff3b3b'};"
         )
+
+    # ---------- dialogs & logs for SystemManager ----------
+    def confirm_dialog(self, prompt: str) -> bool:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Підтвердження дії")
+        box.setText(prompt)
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        return box.exec() == QMessageBox.StandardButton.Yes
+
+    def append_system_log(self, msg: str):
+        # показуємо системні події як повідомлення SNDI
+        self.messages.append({"speaker": "sndi", "text": f"🛠 {msg}", "typing": False})
+        self.render_messages()
 
     # ---------- rendering ----------
     def escape_html(self, text: str) -> str:
@@ -349,7 +370,19 @@ class ChatWindow(QWidget):
         if not user_text:
             return
         self.send_sound.play()
+        # 1) додати користувацьке повідомлення
         self.messages.append({"speaker": "user", "text": user_text, "typing": False})
+
+        # 2) СПОЧАТКУ спробувати системну інтенцію на рівні UI (без виклику LLM)
+        handled, resp = self.system_mgr.dispatch(user_text)
+        if handled:
+            # показати відповідь одразу, без "друкує…"
+            self.messages.append({"speaker": "sndi", "text": resp, "typing": False})
+            self.render_messages()
+            self.input_field.clear()
+            return
+
+        # 3) якщо не системна — показуємо «друкує…» і йдемо в LLM
         self.messages.append({"speaker": "sndi", "text": "друкує…", "typing": True})
         self.dot_phase = 0
         self.streaming_text = None
