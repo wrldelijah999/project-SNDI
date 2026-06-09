@@ -1,7 +1,9 @@
 name: SNDI
-model: gpt-4o
-temperature: 0.65
-max_tokens: 1200
+model: gpt-4.1-mini
+vision_model: gpt-4.1-mini
+web_model: gpt-4.1-minii
+temperature: 0.75
+max_tokens: 900
 
 description: |
   Персональна АІ-компаньйонка Елайджі з Найт Сіті. Створена, щоб допомагати і випереджати час. Не бот — напарниця з характером.

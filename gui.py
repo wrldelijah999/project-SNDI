@@ -33,10 +33,22 @@ from PyQt6.QtGui import (
     QTextCursor,
 )
 
+from sndi.core.conversation_core import ask
+from sndi.storage import resource_path
+from sndi.system_manager import SystemManager
+from sndi.core.intents import is_screen_scan_intent
+from sndi.tools.screen_capture import capture_screen, cleanup_screenshot
+from sndi.services.openai_service import analyze_image
+from sndi.core.memory import append_history
 from sndi.core.intents import is_screen_scan_intent, is_project_awareness_intent
 from sndi.tools.screen_capture import capture_screen, cleanup_screenshot
 from sndi.tools.project_context import build_project_snapshot
-from sndi.services.openai_service import analyze_image, analyze_project_snapshot
+from sndi.services.openai_service import (
+    analyze_image,
+    analyze_project_snapshot,
+    decide_if_web_needed,
+    call_web_search,
+)
 
 try:
     import pygame
@@ -239,6 +251,33 @@ class ProjectThread(QThread):
 
         self.finished.emit(reply)
 
+# ---------- async: internet awareness ----------
+class WebThread(QThread):
+    finished = pyqtSignal(str)
+
+    def __init__(self, user_text: str):
+        super().__init__()
+        self.user_text = user_text
+
+    def run(self):
+        try:
+            decision = decide_if_web_needed(self.user_text)
+
+            if not decision.get("needs_web", False):
+                self.finished.emit("__NO_WEB_NEEDED__")
+                return
+
+            query = decision.get("query", "") or self.user_text
+            reply = call_web_search(self.user_text, query)
+
+            if not reply or not reply.strip():
+                reply = "вийшла в інтернет, але нічого нормального не витягнула."
+
+        except Exception as error:
+            print("[SNDI][WEB THREAD ERROR]", error)
+            reply = f"⚡ web awareness впав: {error}"
+
+        self.finished.emit(reply)
 
 # ---------- widget: NeonBar ----------
 class NeonBar(QWidget):
@@ -337,6 +376,7 @@ class ChatWindow(QWidget):
         self.response_thread: ResponseThread | None = None
         self.scan_thread: ScanThread | None = None
         self.project_thread: ProjectThread | None = None
+        self.web_thread: WebThread | None = None
         self.streaming_text: str | None = None
         self.streaming_index = 0
         self.dot_phase = 0
@@ -829,31 +869,10 @@ class ChatWindow(QWidget):
             self._start_scan(user_text)
             self.input_field.clear()
             return
-        
-        if is_project_awareness_intent(user_text):
-            self._start_project_awareness(user_text)
-            self.input_field.clear()
-            return
 
-        self.messages.append(
-            {
-                "speaker": "sndi",
-                "text": "друкує…",
-                "typing": True,
-            }
-        )
-
-        self.dot_phase = 0
-        self.streaming_text = None
-        self.streaming_index = 0
-
-        self.timer.start(450)
-        self.render_messages()
+        self._start_web_or_normal(user_text)
         self.input_field.clear()
-
-        self.response_thread = ResponseThread(user_text)
-        self.response_thread.finished.connect(self.receive_reply)
-        self.response_thread.start()
+        return
 
     # ---------- screen scan ----------
        # ---------- screen scan ----------
@@ -1025,6 +1044,95 @@ class ChatWindow(QWidget):
             lambda reply: self._receive_project_awareness_reply(user_text, reply)
         )
         self.project_thread.start()
+
+    # ---------- normal response ----------
+    def _start_normal_response(self, user_text: str):
+        self.set_status(True, "thinking")
+
+        self.messages.append(
+            {
+                "speaker": "sndi",
+                "text": "",
+                "typing": True,
+            }
+        )
+
+        self.dot_phase = 0
+        self.streaming_text = None
+        self.streaming_index = 0
+
+        self.timer.start(450)
+        self.render_messages()
+
+        self.response_thread = ResponseThread(user_text)
+        self.response_thread.finished.connect(self.receive_reply)
+        self.response_thread.start()
+
+    # ---------- internet awareness ----------
+    def _start_web_or_normal(self, user_text: str):
+        """
+        Let SNDI decide whether this request needs internet.
+        If yes — use web_search.
+        If no — continue normal chat flow.
+        """
+        self.set_status(True, "thinking")
+
+        self.messages.append(
+            {
+                "speaker": "sndi",
+                "text": "оцінюю, чи треба виходити в мережу…",
+                "typing": True,
+            }
+        )
+
+        self.dot_phase = 0
+        self.streaming_text = None
+        self.streaming_index = 0
+
+        self.timer.start(450)
+        self.render_messages()
+
+        self.web_thread = WebThread(user_text)
+        self.web_thread.finished.connect(
+            lambda reply: self._receive_web_or_normal_reply(user_text, reply)
+        )
+        self.web_thread.start()
+
+    def _receive_web_or_normal_reply(self, user_text: str, reply: str):
+        if reply == "__NO_WEB_NEEDED__":
+            if self.messages and self.messages[-1]["speaker"] == "sndi":
+                self.messages.pop()
+
+            if is_project_awareness_intent(user_text):
+                self._start_project_awareness(user_text)
+            else:
+                self._start_normal_response(user_text)
+
+            return
+
+        self.sound_manager.play_message()
+        self.set_status(True, "online")
+
+        if not reply or not reply.strip():
+            reply = "web sensor мовчить. інтернет ніби є, але відповідь не зібралась."
+
+        try:
+            append_history(user_text, reply)
+        except Exception as error:
+            print("[SNDI][WEB HISTORY ERROR]", error)
+
+        if not self.messages or self.messages[-1]["speaker"] != "sndi":
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": "",
+                    "typing": True,
+                }
+            )
+
+        self.streaming_text = reply
+        self.streaming_index = 0
+        self.timer.start(12)
 
     def _receive_project_awareness_reply(self, user_text: str, reply: str):
         self.sound_manager.play_message()

@@ -1,3 +1,14 @@
 {
-  "age": 20
+  "capabilities": {
+    "web_sensor": true,
+    "screen_sensor": true,
+    "project_sensor": true
+  },
+  "sndi_state": {
+    "current_version": "1.6-dev",
+    "canonical_name": "SNDI",
+    "web_sensor_note": "SNDI має доступ до інтернету через OpenAI web_search tool. Це не браузер напряму, а web sensor для актуальної інформації.",
+    "screen_sensor_note": "SNDI може аналізувати скріншот екрана.",
+    "project_sensor_note": "SNDI може аналізувати локальний проєкт, brain map, структуру файлів і git-стан."
+  }
 }

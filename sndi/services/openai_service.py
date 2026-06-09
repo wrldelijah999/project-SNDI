@@ -1,11 +1,13 @@
 # sndi/services/openai_service.py
 
 import os
+import json
 import base64
 import traceback
 
 from openai import OpenAI
 from dotenv import load_dotenv
+from sndi.tools.web_access import build_web_decision_messages, build_web_input
 
 from sndi.config_loader import load_config
 
@@ -197,3 +199,102 @@ def analyze_project_snapshot(snapshot: str, user_text: str) -> str:
     except Exception as error:
         print("[SNDI][PROJECT ANALYSIS ERROR]", error)
         return f"⚡ project awareness впав: {error}"
+    
+def _extract_json_object(raw: str) -> dict:
+    """
+    Robust JSON extraction from model response.
+    """
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+
+    try:
+        start = raw.find("{")
+        end = raw.rfind("}")
+
+        if start != -1 and end != -1 and end > start:
+            return json.loads(raw[start:end + 1])
+    except Exception:
+        pass
+
+    return {}
+
+
+def decide_if_web_needed(user_text: str) -> dict:
+    """
+    Ask the model whether this user request needs internet access.
+
+    Returns:
+      {
+        "needs_web": bool,
+        "query": str,
+        "reason": str
+      }
+    """
+    try:
+        messages = build_web_decision_messages(user_text)
+        raw = call_model(messages)
+
+        data = _extract_json_object(raw)
+
+        needs_web = bool(data.get("needs_web", False))
+        query = str(data.get("query", "") or "").strip()
+        reason = str(data.get("reason", "") or "").strip()
+
+        if needs_web and not query:
+            query = user_text.strip()
+
+        return {
+            "needs_web": needs_web,
+            "query": query,
+            "reason": reason,
+        }
+
+    except Exception as error:
+        print("[SNDI][WEB DECISION ERROR]", error)
+        return {
+            "needs_web": False,
+            "query": "",
+            "reason": f"web decision error: {error}",
+        }
+
+
+def call_web_search(user_text: str, query: str = "") -> str:
+    """
+    Use OpenAI hosted web_search tool through Responses API.
+
+    This gives SNDI actual internet awareness without browser automation.
+    """
+    try:
+        client = _get_client()
+
+        web_model = _config.get("web_model", "gpt-4.1-mini")
+        web_input = build_web_input(user_text=user_text, query=query)
+
+        response = client.responses.create(
+            model=web_model,
+            tools=[
+                {
+                    "type": "web_search",
+                }
+            ],
+            input=web_input,
+        )
+
+        reply = getattr(response, "output_text", "") or ""
+
+        if not reply.strip():
+            return "вийшла в інтернет, але відповідь порожня. канал є, сигнал слабкий."
+
+        return reply.strip()
+
+    except Exception as error:
+        print("[SNDI][WEB SEARCH ERROR]", error)
+        traceback.print_exc()
+        return (
+            "⚡ web sensor впав. "
+            f"Помилка: {error}\n\n"
+            "Можливі причини: модель для web_search недоступна, стара версія OpenAI SDK, "
+            "або Responses API/web_search не активний для цього ключа."
+        )    
