@@ -39,6 +39,10 @@ from sndi.system_manager import SystemManager
 from sndi.core.intents import is_screen_scan_intent
 from sndi.tools.screen_capture import capture_screen, cleanup_screenshot
 from sndi.services.openai_service import analyze_image
+from sndi.core.intents import is_screen_scan_intent, is_project_awareness_intent
+from sndi.tools.screen_capture import capture_screen, cleanup_screenshot
+from sndi.tools.project_context import build_project_snapshot
+from sndi.services.openai_service import analyze_image, analyze_project_snapshot
 
 try:
     import pygame
@@ -218,6 +222,30 @@ class ScanThread(QThread):
             cleanup_screenshot(self.screenshot_path)
 
         self.finished.emit(reply)
+
+# ---------- async: local project awareness ----------
+class ProjectThread(QThread):
+    finished = pyqtSignal(str)
+
+    def __init__(self, user_text: str):
+        super().__init__()
+        self.user_text = user_text
+
+    def run(self):
+        try:
+            snapshot = build_project_snapshot(self.user_text)
+            reply = analyze_project_snapshot(snapshot, self.user_text)
+
+            if not reply or not reply.strip():
+                reply = "бачу проєкт, але думка не зібралась. модель повернула порожню відповідь."
+
+        except Exception as error:
+            print("[SNDI][PROJECT THREAD ERROR]", error)
+            reply = f"⚡ project awareness впав: {error}"
+
+        self.finished.emit(reply)
+
+
 # ---------- widget: NeonBar ----------
 class NeonBar(QWidget):
     """
@@ -314,6 +342,7 @@ class ChatWindow(QWidget):
         self.messages: list[dict] = []
         self.response_thread: ResponseThread | None = None
         self.scan_thread: ScanThread | None = None
+        self.project_thread: ProjectThread | None = None
         self.streaming_text: str | None = None
         self.streaming_index = 0
         self.dot_phase = 0
@@ -806,6 +835,11 @@ class ChatWindow(QWidget):
             self._start_scan(user_text)
             self.input_field.clear()
             return
+        
+        if is_project_awareness_intent(user_text):
+            self._start_project_awareness(user_text)
+            self.input_field.clear()
+            return
 
         self.messages.append(
             {
@@ -955,6 +989,60 @@ class ChatWindow(QWidget):
 
         if not reply or not reply.strip():
             reply = "шум глушить канал. повтори."
+
+        if not self.messages or self.messages[-1]["speaker"] != "sndi":
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": "",
+                    "typing": True,
+                }
+            )
+
+        self.streaming_text = reply
+        self.streaming_index = 0
+        self.timer.start(12)
+
+    # ---------- local project awareness ----------
+    def _start_project_awareness(self, user_text: str):
+        """
+        Build local project snapshot and let SNDI reason about it.
+        Read-only. No file modifications.
+        """
+        self.set_status(True, "scanning")
+
+        self.messages.append(
+            {
+                "speaker": "sndi",
+                "text": "підключаюсь до локального проєкту…",
+                "typing": True,
+            }
+        )
+
+        self.dot_phase = 0
+        self.streaming_text = None
+        self.streaming_index = 0
+
+        self.timer.start(450)
+        self.render_messages()
+
+        self.project_thread = ProjectThread(user_text)
+        self.project_thread.finished.connect(
+            lambda reply: self._receive_project_awareness_reply(user_text, reply)
+        )
+        self.project_thread.start()
+
+    def _receive_project_awareness_reply(self, user_text: str, reply: str):
+        self.sound_manager.play_message()
+        self.set_status(True, "online")
+
+        if not reply or not reply.strip():
+            reply = "я бачу проєкт, але відповідь не зібралась. щось глухне на каналі."
+
+        try:
+            append_history(user_text, reply)
+        except Exception as error:
+            print("[SNDI][PROJECT HISTORY ERROR]", error)
 
         if not self.messages or self.messages[-1]["speaker"] != "sndi":
             self.messages.append(

@@ -125,3 +125,75 @@ def analyze_image(image_path: str, prompt: str) -> str:
         print("[SNDI][VISION ERROR]", error)
         traceback.print_exc()
         return f"⚡ скан збоїть: {error}"
+
+def analyze_project_snapshot(snapshot: str, user_text: str) -> str:
+    """
+    Send local project snapshot to the model and ask SNDI to reason about it.
+
+    The snapshot already contains:
+      - project tree
+      - git state
+      - project brain map
+      - auto-selected relevant files
+
+    The model should reason, not follow a hardcoded checklist.
+    """
+    try:
+        system_prompt = (
+            "Ти — SNDI, локальна cyberpunk AI-система користувача. "
+            "Тобі дали реальний read-only snapshot твого локального проєкту. "
+            "Snapshot містить дерево проєкту, git-стан, project brain map і вибрані файли. "
+            "Твоя задача — самостійно зрозуміти, що відбувається, а не виконувати чекліст.\n\n"
+            "Головний принцип:\n"
+            "- якщо користувач каже 'вона', 'ти', 'тебе', 'себе', 'ця штука', "
+            "у контексті технічного питання — майже завжди мається на увазі локальний проєкт SNDI;\n"
+            "- якщо користувач питає 'чому вона не памʼятає історію', "
+            "не відповідай про політику памʼяті ChatGPT; аналізуй memory.py, storage.py, history.json, conversation_core.py і gui.py зі snapshot;\n"
+            "- якщо користувач питає 'де графічний інтерфейс', шукай UI/GUI/ChatWindow/PyQt у project brain map;\n"
+            "- не чекай, що користувач точно назве файл;\n"
+            "- сама орієнтуйся по project brain map;\n"
+            "- якщо запит кривий або загальний, визначай, які частини системи можуть бути повʼязані;\n"
+            "- думай як жива напарниця-архітектор, а не як grep-скрипт.\n\n"
+            "Правила:\n"
+            "- не кажи, що не маєш доступу: snapshot уже перед тобою;\n"
+            "- не вигадуй файли або код, яких немає в snapshot;\n"
+            "- не стверджуй, що бачиш увесь компʼютер — ти бачиш лише локальний snapshot проєкту;\n"
+            "- не пропонуй автоматично змінювати файли;\n"
+            "- не давай diff, якщо користувач прямо не просив;\n"
+            "- не запускай і не радь небезпечні команди без явного запиту;\n"
+            "- якщо користувач не просив план дій, не закінчуй відповідь списком наступних кроків;\n"
+            "- відповідай українською;\n"
+            "- говори як SNDI: прямо, живо, з характером, без корпоративного тону.\n\n"
+            "Як відповідати:\n"
+            "1. коротко скажи, що ти зрозуміла із запиту;\n"
+            "2. поясни, які частини проєкту повʼязані з цим;\n"
+            "3. якщо бачиш потенційну причину або слабке місце — назви його;\n"
+            "4. якщо запит загальний — дай стислий висновок по архітектурі;\n"
+            "5. не розтягуй відповідь без потреби."
+        )
+
+        messages = [
+            {
+                "role": "system",
+                "content": system_prompt,
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Запит користувача:\n{user_text}\n\n"
+                    f"Ось локальний snapshot проєкту:\n\n"
+                    f"{snapshot}"
+                ),
+            },
+        ]
+
+        reply = call_model(messages)
+
+        if not reply or not reply.strip():
+            return "бачу snapshot, але канал відповіді глухий. модель нічого не повернула."
+
+        return reply.strip()
+
+    except Exception as error:
+        print("[SNDI][PROJECT ANALYSIS ERROR]", error)
+        return f"⚡ project awareness впав: {error}"
