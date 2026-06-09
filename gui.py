@@ -33,12 +33,6 @@ from PyQt6.QtGui import (
     QTextCursor,
 )
 
-from sndi.core.conversation_core import ask
-from sndi.storage import resource_path
-from sndi.system_manager import SystemManager
-from sndi.core.intents import is_screen_scan_intent
-from sndi.tools.screen_capture import capture_screen, cleanup_screenshot
-from sndi.services.openai_service import analyze_image
 from sndi.core.intents import is_screen_scan_intent, is_project_awareness_intent
 from sndi.tools.screen_capture import capture_screen, cleanup_screenshot
 from sndi.tools.project_context import build_project_snapshot
