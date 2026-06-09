@@ -8,6 +8,8 @@ import traceback
 from openai import OpenAI
 from dotenv import load_dotenv
 from sndi.tools.web_access import build_web_decision_messages, build_web_input
+from sndi.tools.system_index import build_system_index_prompt
+from sndi.tools.process_control import build_process_prompt
 
 from sndi.config_loader import load_config
 
@@ -298,3 +300,151 @@ def call_web_search(user_text: str, query: str = "") -> str:
             "Можливі причини: модель для web_search недоступна, стара версія OpenAI SDK, "
             "або Responses API/web_search не активний для цього ключа."
         )    
+    
+def decide_system_action(user_text: str) -> dict:
+    """
+    Decide whether the user wants a local system action.
+
+    Uses system index, so SNDI can map casual phrases to real installed targets.
+
+    Returns:
+      {
+        "is_system_action": bool,
+        "intent": str,
+        "target": str,
+        "url": str,
+        "query": str,
+        "confidence": float,
+        "reason": str
+      }
+    """
+    try:
+        system_index_prompt = build_system_index_prompt(force_refresh=True)
+        process_prompt = build_process_prompt()
+
+        system_prompt = """
+Ти — SNDI system action router.
+
+Твоя задача — зрозуміти, чи користувач хоче виконати локальну дію на ПК,
+і якщо так — вибрати реальний target із SYSTEM INDEX.
+
+Відповідай ТІЛЬКИ валідним JSON без markdown.
+
+Формат:
+{
+  "is_system_action": true або false,
+"intent": "open_known_target | open_app | open_site | open_url | open_folder | close_target | web_search_browser | find_file | refresh_system_index | unknown",
+"target": "точна назва target із SYSTEM INDEX або реальна назва цілі",
+  "url": "url якщо є",
+  "query": "пошуковий запит або назва файлу якщо є",
+  "confidence": число від 0 до 1,
+  "reason": "коротко чому"
+}
+
+Головний принцип:
+Як працювати з папками і файлами:
+- Якщо користувач просить "відкрий папку X", шукай у SYSTEM INDEX саме target з name/aliases/path, близьким до X.
+- Не відкривай загальну папку Documents/Downloads/Desktop, якщо користувач назвав конкретну папку.
+- Documents обирай тільки коли користувач прямо просить "документи".
+- Downloads обирай тільки коли користувач прямо просить "завантаження" або "загрузки".
+- Якщо користувач просить "ДИПЛОМ", "дипломна", "мій диплом", шукай найближчий folder/file у SYSTEM INDEX з такою назвою.
+- Якщо точного або дуже близького target немає, intent="unknown", confidence нижче 0.45.
+- Не підміняй конкретний target батьківською папкою.
+- Не вимагай від користувача точну назву програми.
+- Користувач може писати криво, сленгом, транслітом або скорочено.
+- Ти маєш зіставити його фразу з тим, що реально є в SYSTEM INDEX.
+- Якщо користувач каже "дейзі", а в SYSTEM INDEX є "DayZ" — це, ймовірно, DayZ.
+- Якщо користувач каже "кс", "контра", "cs" — це Counter-Strike 2, якщо є такий target або відомий steam target.
+- Якщо користувач каже "папку SNDI", target має бути "SNDI project", якщо він є в SYSTEM INDEX.
+- Якщо є кілька схожих варіантів і впевненість низька — is_system_action=true, intent="unknown", confidence низький.
+- Якщо користувач просить "онови карту ПК", "перескануй комп", "онови індекс", "заново проскануй файли" — intent="refresh_system_index", is_system_action=true.
+- Якщо користувач просить "закрий", "вируби", "заверши", "прибери програму", "закрий сайт", "закрий гру" — intent="close_target", is_system_action=true.
+
+Коли is_system_action = true:
+- користувач просить відкрити програму, гру, сайт або папку;
+- каже "включи", "запусти", "відкрий", "зайди", "погнали в", "врубай", "го в";
+- просить знайти файл на компʼютері;
+- просить відкрити браузерний пошук.
+
+Коли is_system_action = false:
+- користувач просто питає факт;
+- просить поради;
+- питає про локальний проєкт SNDI;
+- питає про екран;
+- просить знайти актуальну інформацію в інтернеті для відповіді, а не відкрити браузер.
+
+Інтенти:
+- open_known_target: якщо можеш вибрати target із SYSTEM INDEX або відомого registry.
+- open_app: якщо просить відкрити програму.
+- open_site: якщо просить зайти на сайт.
+- open_url: якщо прямо дав URL.
+- open_folder: якщо просить папку.
+- web_search_browser: якщо просить саме відкрити пошук у браузері.
+- find_file: якщо просить знайти файл на ПК.
+- unknown: якщо схоже на системну дію, але target нечіткий.
+
+Для close_target:
+- Обирай target із RUNNING PROCESSES.
+- У target бажано повертай process name, наприклад "chrome.exe", "telegram.exe", "discord.exe", "steam.exe".
+- Не закривай системні процеси.
+- Якщо користувач просить закрити сайт, обирай браузер тільки якщо зрозуміло, що треба закрити весь браузер. Інакше confidence нижче 0.45.
+
+
+Не вигадуй, що дія виконана. Ти тільки класифікуєш.
+""".strip()
+
+        messages = [
+            {
+                "role": "system",
+                "content": system_prompt,
+            },
+            {
+                "role": "system",
+                "content": system_index_prompt,
+            },
+            {
+                "role": "user",
+                "content": user_text,
+            },
+            {
+                 "role": "system",
+                 "content": process_prompt,
+            },
+        ]
+
+        raw = call_model(messages)
+        data = _extract_json_object(raw)
+
+        is_system_action = bool(data.get("is_system_action", False))
+        intent = str(data.get("intent", "unknown") or "unknown").strip()
+        target = str(data.get("target", "") or "").strip()
+        url = str(data.get("url", "") or "").strip()
+        query = str(data.get("query", "") or "").strip()
+        reason = str(data.get("reason", "") or "").strip()
+
+        try:
+            confidence = float(data.get("confidence", 0.0))
+        except Exception:
+            confidence = 0.0
+
+        return {
+            "is_system_action": is_system_action,
+            "intent": intent,
+            "target": target,
+            "url": url,
+            "query": query,
+            "confidence": confidence,
+            "reason": reason,
+        }
+
+    except Exception as error:
+        print("[SNDI][SYSTEM ACTION DECISION ERROR]", error)
+        return {
+            "is_system_action": False,
+            "intent": "unknown",
+            "target": "",
+            "url": "",
+            "query": "",
+            "confidence": 0.0,
+            "reason": f"system action decision error: {error}",
+        }

@@ -42,12 +42,14 @@ from sndi.services.openai_service import analyze_image
 from sndi.core.memory import append_history
 from sndi.core.intents import is_screen_scan_intent, is_project_awareness_intent
 from sndi.tools.screen_capture import capture_screen, cleanup_screenshot
+from sndi.tools.system_control import run_system_control_from_text
 from sndi.tools.project_context import build_project_snapshot
 from sndi.services.openai_service import (
     analyze_image,
     analyze_project_snapshot,
     decide_if_web_needed,
     call_web_search,
+    decide_system_action,
 )
 
 try:
@@ -279,6 +281,42 @@ class WebThread(QThread):
 
         self.finished.emit(reply)
 
+# ---------- async: system control ----------
+class SystemActionThread(QThread):
+    finished = pyqtSignal(str)
+
+    def __init__(self, user_text: str):
+        super().__init__()
+        self.user_text = user_text
+
+    def run(self):
+        try:
+            action = decide_system_action(self.user_text)
+
+            if not action.get("is_system_action", False):
+                self.finished.emit("__NO_SYSTEM_ACTION__")
+                return
+
+            confidence = float(action.get("confidence", 0.0) or 0.0)
+
+            if confidence < 0.45:
+                self.finished.emit("__NO_SYSTEM_ACTION__")
+                return
+
+            reply = run_system_control_from_text(self.user_text, action)
+
+            if not reply or not reply.strip():
+                reply = "системна дія ніби виконалась, але відповідь порожня."
+
+        except Exception as error:
+            print("[SNDI][SYSTEM ACTION THREAD ERROR]", error)
+            reply = f"⚡ system control впав: {error}"
+
+        self.finished.emit(reply)
+
+
+
+
 # ---------- widget: NeonBar ----------
 class NeonBar(QWidget):
     """
@@ -377,6 +415,7 @@ class ChatWindow(QWidget):
         self.scan_thread: ScanThread | None = None
         self.project_thread: ProjectThread | None = None
         self.web_thread: WebThread | None = None
+        self.system_action_thread: SystemActionThread | None = None
         self.streaming_text: str | None = None
         self.streaming_index = 0
         self.dot_phase = 0
@@ -851,26 +890,12 @@ class ChatWindow(QWidget):
             }
         )
 
-        handled, response = self.system_mgr.dispatch(user_text)
-
-        if handled:
-            self.messages.append(
-                {
-                    "speaker": "sndi",
-                    "text": response,
-                    "typing": False,
-                }
-            )
-            self.render_messages()
-            self.input_field.clear()
-            return
-        
         if is_screen_scan_intent(user_text):
             self._start_scan(user_text)
             self.input_field.clear()
             return
 
-        self._start_web_or_normal(user_text)
+        self._start_system_or_web_or_normal(user_text)
         self.input_field.clear()
         return
 
@@ -1068,6 +1093,68 @@ class ChatWindow(QWidget):
         self.response_thread.finished.connect(self.receive_reply)
         self.response_thread.start()
 
+        # ---------- system control ----------
+    def _start_system_or_web_or_normal(self, user_text: str):
+        """
+        First let SNDI decide whether this is a local system action.
+        If not — continue to web-or-normal flow.
+        """
+        self.set_status(True, "thinking")
+
+        self.messages.append(
+            {
+                "speaker": "sndi",
+                "text": "зчитую системний намір…",
+                "typing": True,
+            }
+        )
+
+        self.dot_phase = 0
+        self.streaming_text = None
+        self.streaming_index = 0
+
+        self.timer.start(450)
+        self.render_messages()
+
+        self.system_action_thread = SystemActionThread(user_text)
+        self.system_action_thread.finished.connect(
+            lambda reply: self._receive_system_or_continue_reply(user_text, reply)
+        )
+        self.system_action_thread.start()
+
+    def _receive_system_or_continue_reply(self, user_text: str, reply: str):
+        if reply == "__NO_SYSTEM_ACTION__":
+            if self.messages and self.messages[-1]["speaker"] == "sndi":
+                self.messages.pop()
+
+            self._start_web_or_normal(user_text)
+            return
+
+        self.sound_manager.play_message()
+        self.set_status(True, "online")
+
+        if not reply or not reply.strip():
+            reply = "системна дія не дала відповіді."
+
+        try:
+            append_history(user_text, reply)
+        except Exception as error:
+            print("[SNDI][SYSTEM ACTION HISTORY ERROR]", error)
+
+        if not self.messages or self.messages[-1]["speaker"] != "sndi":
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": "",
+                    "typing": True,
+                }
+            )
+
+        self.streaming_text = reply
+        self.streaming_index = 0
+        self.timer.start(12)
+
+        
     # ---------- internet awareness ----------
     def _start_web_or_normal(self, user_text: str):
         """
