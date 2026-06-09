@@ -36,6 +36,9 @@ from PyQt6.QtGui import (
 from sndi.core.conversation_core import ask
 from sndi.storage import resource_path
 from sndi.system_manager import SystemManager
+from sndi.core.intents import is_screen_scan_intent
+from sndi.tools.screen_capture import capture_screen, cleanup_screenshot
+from sndi.services.openai_service import analyze_image
 
 try:
     import pygame
@@ -175,7 +178,46 @@ class ResponseThread(QThread):
             reply = "система дала збій. перевір консоль."
         self.finished.emit(reply)
 
+# ---------- async: screen scan ----------
+_VISION_SYSTEM_PROMPT = (
+    "Ти — SNDI, cyberpunk AI companion користувача. "
+    "Ти дивишся на скріншот його екрана. "
+    "Поясни, що відкрито, що може бути важливим, що може бути проблемою, "
+    "і дай 1-2 конкретні наступні кроки. "
+    "Відповідай українською. Говори коротко, точно, як напарниця, "
+    "а не як сухий корпоративний асистент. "
+    "Не вигадуй того, чого не видно на екрані."
+)
 
+
+class ScanThread(QThread):
+    finished = pyqtSignal(str)
+
+    def __init__(self, screenshot_path: str, user_text: str):
+        super().__init__()
+        self.screenshot_path = screenshot_path
+        self.user_text = user_text
+
+    def run(self):
+        try:
+            prompt = (
+                f"{_VISION_SYSTEM_PROMPT}\n\n"
+                f"Запит користувача: {self.user_text}"
+            )
+
+            reply = analyze_image(self.screenshot_path, prompt)
+
+            if not reply or not reply.strip():
+                reply = "глухий канал. нічого не бачу."
+
+        except Exception as error:
+            print("[SNDI][SCAN THREAD ERROR]", error)
+            reply = f"⚡ скан впав: {error}"
+
+        finally:
+            cleanup_screenshot(self.screenshot_path)
+
+        self.finished.emit(reply)
 # ---------- widget: NeonBar ----------
 class NeonBar(QWidget):
     """
@@ -271,6 +313,7 @@ class ChatWindow(QWidget):
         # state
         self.messages: list[dict] = []
         self.response_thread: ResponseThread | None = None
+        self.scan_thread: ScanThread | None = None
         self.streaming_text: str | None = None
         self.streaming_index = 0
         self.dot_phase = 0
@@ -758,6 +801,11 @@ class ChatWindow(QWidget):
             self.render_messages()
             self.input_field.clear()
             return
+        
+        if is_screen_scan_intent(user_text):
+            self._start_scan(user_text)
+            self.input_field.clear()
+            return
 
         self.messages.append(
             {
@@ -778,6 +826,129 @@ class ChatWindow(QWidget):
         self.response_thread = ResponseThread(user_text)
         self.response_thread.finished.connect(self.receive_reply)
         self.response_thread.start()
+
+    # ---------- screen scan ----------
+       # ---------- screen scan ----------
+    # ---------- screen scan ----------
+    def _start_scan(self, user_text: str):
+        """
+        Hide SNDI window before screenshot so the chat does not cover the screen.
+        Then capture screen and restore the window.
+        """
+        self.set_status(True, "scanning")
+
+        self.messages.append(
+            {
+                "speaker": "sndi",
+                "text": "зникаю з екрана на секунду…",
+                "typing": True,
+            }
+        )
+
+        self.dot_phase = 0
+        self.streaming_text = None
+        self.streaming_index = 0
+
+        self.timer.start(450)
+        self.render_messages()
+
+        self.hide()
+
+        QTimer.singleShot(350, lambda: self._capture_after_hide(user_text))
+
+    def _capture_after_hide(self, user_text: str):
+        try:
+            screenshot_path = capture_screen()
+        except Exception as error:
+            print("[SNDI][SCREEN CAPTURE ERROR]", error)
+
+            self.show()
+            self.raise_()
+            self.activateWindow()
+            self.set_status(True, "online")
+
+            if self.messages and self.messages[-1]["speaker"] == "sndi":
+                self.messages[-1]["text"] = f"⚡ не змогла зробити скрін: {error}"
+                self.messages[-1]["typing"] = False
+            else:
+                self.messages.append(
+                    {
+                        "speaker": "sndi",
+                        "text": f"⚡ не змогла зробити скрін: {error}",
+                        "typing": False,
+                    }
+                )
+
+            self.render_messages()
+            return
+
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+        if self.messages and self.messages[-1]["speaker"] == "sndi":
+            self.messages[-1]["text"] = "сканую екран…"
+            self.messages[-1]["typing"] = True
+        else:
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": "сканую екран…",
+                    "typing": True,
+                }
+            )
+
+        self.dot_phase = 0
+        self.streaming_text = None
+        self.streaming_index = 0
+
+        self.timer.start(450)
+        self.render_messages()
+
+        self.scan_thread = ScanThread(screenshot_path, user_text)
+        self.scan_thread.finished.connect(self._receive_scan_reply)
+        self.scan_thread.start()
+
+    def _receive_scan_reply(self, reply: str):
+        self.sound_manager.play_message()
+        self.set_status(True, "online")
+
+        if not reply or not reply.strip():
+            reply = "глухий канал. нічого не бачу."
+
+        if not self.messages or self.messages[-1]["speaker"] != "sndi":
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": "",
+                    "typing": True,
+                }
+            )
+
+        self.streaming_text = reply
+        self.streaming_index = 0
+        self.timer.start(12)
+
+    def _receive_scan_reply(self, reply: str):
+        self.sound_manager.play_message()
+        self.set_status(True, "online")
+
+        if not reply or not reply.strip():
+            reply = "глухий канал. нічого не бачу."
+
+        if not self.messages or self.messages[-1]["speaker"] != "sndi":
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": "",
+                    "typing": True,
+                }
+            )
+
+        self.streaming_text = reply
+        self.streaming_index = 0
+        self.timer.start(12)
+
 
     def receive_reply(self, reply: str):
         self.sound_manager.play_message()
