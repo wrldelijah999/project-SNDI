@@ -308,6 +308,8 @@ def call_web_search(user_text: str, query: str = "") -> str:
 
         reply = getattr(response, "output_text", "") or ""
 
+        print("[SNDI][WEB RAW REPLY]", repr(reply))
+
         if not reply.strip():
             return "вийшла в інтернет, але відповідь порожня. канал є, сигнал слабкий."
 

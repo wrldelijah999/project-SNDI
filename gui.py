@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
-    QTextEdit,
+    QTextBrowser,
     QLineEdit,
     QPushButton,
     QLabel,
@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
 )
 
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QUrl
 from PyQt6.QtGui import (
     QFont,
     QFontDatabase,
@@ -31,6 +31,7 @@ from PyQt6.QtGui import (
     QLinearGradient,
     QBrush,
     QTextCursor,
+    QDesktopServices,
 )
 
 from sndi.core.conversation_core import ask
@@ -470,11 +471,17 @@ class ChatWindow(QWidget):
             )
         )
 
-        self.chat_area = QTextEdit(readOnly=True)
+        self.chat_area = QTextBrowser()
+        self.chat_area.setReadOnly(True)
         self.chat_area.setFont(self.base_font)
+        self.chat_area.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextBrowserInteraction
+        )
+        self.chat_area.setOpenExternalLinks(True)
+
         self.chat_area.setStyleSheet(
             f"""
-            QTextEdit {{
+            QTextBrowser {{
                 background-color: {self.chat_bg};
                 color: {self.cyan_text};
                 padding: 16px;
@@ -683,13 +690,46 @@ class ChatWindow(QWidget):
             .replace('"', "&quot;")
             .replace("'", "&#39;")
         )
+    
+    def linkify_text(self, text: str) -> str:
+        """
+        Escape plain text and convert URLs into clickable links.
+        Supports:
+        - https://example.com
+        - http://example.com
+        - www.example.com
+        """
+        escaped = self.escape_html(text)
+
+        url_pattern = r"((?:https?://|www\.)[^\s<]+)"
+
+        def repl(match):
+            visible_url = match.group(1)
+
+            trailing = ""
+            while visible_url and visible_url[-1] in ".,!?;:)":
+                trailing = visible_url[-1] + trailing
+                visible_url = visible_url[:-1]
+
+            href = visible_url
+
+            if href.startswith("www."):
+                href = "https://" + href
+
+            return (
+                f'<a href="{href}" '
+                f'style="color:#00f0ff; text-decoration:underline;">'
+                f"{visible_url}</a>{trailing}"
+            )
+
+        return re.sub(url_pattern, repl, escaped)
 
     def render_markdown(self, text: str) -> str:
         """
-        Lightweight markdown/code renderer for QTextEdit HTML.
+        Lightweight markdown/code renderer for QTextBrowser HTML.
 
         Supports:
-        - plain multiline text
+        - plain multiline text with clickable URLs
         - fenced code blocks ```python ... ```
         - simple syntax highlighting for Python and JSON
         """
@@ -698,7 +738,6 @@ class ChatWindow(QWidget):
             escaped = self.escape_html(code)
             lang = (lang or "").lower().strip()
 
-            # comments
             escaped = re.sub(
                 r"(#.*?$)",
                 r'<font color="#b3a1ff">\1</font>',
@@ -706,7 +745,6 @@ class ChatWindow(QWidget):
                 flags=re.MULTILINE,
             )
 
-            # strings
             escaped = re.sub(
                 r"(&quot;.*?&quot;|&#39;.*?&#39;)",
                 r'<font color="#5ffbf1">\1</font>',
@@ -784,16 +822,16 @@ class ChatWindow(QWidget):
 
         parts = []
         position = 0
-
         pattern = re.compile(r"```(\w+)?\n(.*?)```", re.DOTALL)
 
         for match in pattern.finditer(text):
-            normal_text = text[position : match.start()]
+            normal_text = text[position:match.start()]
 
             if normal_text:
+                safe_text = self.linkify_text(normal_text)
                 parts.append(
                     '<span style="white-space: pre-wrap;">'
-                    f"{self.escape_html(normal_text)}"
+                    f"{safe_text}"
                     "</span>"
                 )
 
@@ -806,9 +844,10 @@ class ChatWindow(QWidget):
         tail = text[position:]
 
         if tail:
+            safe_tail = self.linkify_text(tail)
             parts.append(
                 '<span style="white-space: pre-wrap;">'
-                f"{self.escape_html(tail)}"
+                f"{safe_tail}"
                 "</span>"
             )
 
