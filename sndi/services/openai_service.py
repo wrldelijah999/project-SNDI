@@ -19,6 +19,18 @@ _config = load_config()
 
 _client: OpenAI | None = None
 
+_system_index_prompt_cache: str | None = None
+
+
+def _get_system_index_prompt(force: bool = False) -> str:
+    global _system_index_prompt_cache
+
+    if _system_index_prompt_cache is None or force:
+        _system_index_prompt_cache = build_system_index_prompt(force_refresh=force)
+
+    return _system_index_prompt_cache
+
+
 
 def _get_client() -> OpenAI:
     """
@@ -222,6 +234,16 @@ def _extract_json_object(raw: str) -> dict:
 
     return {}
 
+def looks_like_web_request(text: str) -> bool:
+    t = text.lower().strip()
+
+    keywords = [
+        "пошукай", "знайди в інтернеті", "подивись в інтернеті",
+        "актуально", "сьогодні", "зараз", "новини",
+        "ціна", "курс", "погода", "розклад",
+    ]
+
+    return any(k in t for k in keywords)
 
 def decide_if_web_needed(user_text: str) -> dict:
     """
@@ -301,6 +323,18 @@ def call_web_search(user_text: str, query: str = "") -> str:
             "або Responses API/web_search не активний для цього ключа."
         )    
     
+def looks_like_system_request(text: str) -> bool:
+    t = text.lower().strip()
+
+    keywords = [
+        "відкрий", "запусти", "включи", "увімкни", "зайди",
+        "закрий", "вируби", "заверши",
+        "знайди файл", "знайди папку",
+        "онови індекс", "онови карту", "перескануй комп",
+    ]
+
+    return any(k in t for k in keywords)
+
 def decide_system_action(user_text: str) -> dict:
     """
     Decide whether the user wants a local system action.
@@ -319,7 +353,7 @@ def decide_system_action(user_text: str) -> dict:
       }
     """
     try:
-        system_index_prompt = build_system_index_prompt(force_refresh=True)
+        system_index_prompt = _get_system_index_prompt(force=False)
         process_prompt = build_process_prompt()
 
         system_prompt = """

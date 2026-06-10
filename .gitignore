@@ -1,36 +1,37 @@
-# ---------- secrets ----------
+# secrets
 .env
 *.env
 
-# ---------- python ----------
+# python
 __pycache__/
 */__pycache__/
 *.py[cod]
-*.pyo
-*.pyd
 
-# ---------- build artifacts ----------
-build/
-dist/
-*.spec.bak
-
-# ---------- temporary files ----------
-last_raw.txt
-tempCodeRunnerFile.py
-*.tmp
-*.log
-
-# ---------- virtual environments ----------
+# virtual env
 venv/
 .venv/
 env/
 
-# ---------- IDE / OS ----------
+# build
+build/
+dist/
+*.spec.bak
+
+# temp
+tempCodeRunnerFile.py
+*.tmp
+*.log
+
+# archives
+*.zip
+*.rar
+
+# local memory
+memory/*.json
+!memory/.gitkeep
+
+# OS / IDE
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
-
-# ---------- local app/user data ----------
-memory/history.json
-memory/profile.json

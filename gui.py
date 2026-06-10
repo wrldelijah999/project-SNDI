@@ -36,12 +36,9 @@ from PyQt6.QtGui import (
 from sndi.core.conversation_core import ask
 from sndi.storage import resource_path
 from sndi.system_manager import SystemManager
-from sndi.core.intents import is_screen_scan_intent
 from sndi.tools.screen_capture import capture_screen, cleanup_screenshot
-from sndi.services.openai_service import analyze_image
 from sndi.core.memory import append_history
 from sndi.core.intents import is_screen_scan_intent, is_project_awareness_intent
-from sndi.tools.screen_capture import capture_screen, cleanup_screenshot
 from sndi.tools.system_control import run_system_control_from_text
 from sndi.tools.project_context import build_project_snapshot
 from sndi.services.openai_service import (
@@ -50,6 +47,7 @@ from sndi.services.openai_service import (
     decide_if_web_needed,
     call_web_search,
     decide_system_action,
+    looks_like_system_request
 )
 
 try:
@@ -291,7 +289,18 @@ class SystemActionThread(QThread):
 
     def run(self):
         try:
-            action = decide_system_action(self.user_text)
+            if looks_like_system_request(self.user_text):
+                action = decide_system_action(self.user_text)
+            else:
+                action = {
+                    "is_system_action": False,
+                    "intent": "unknown",
+                    "target": "",
+                    "url": "",
+                    "query": "",
+                    "confidence": 0.0,
+                    "reason": "skipped system AI check: message does not look like a system request",
+                }
 
             if not action.get("is_system_action", False):
                 self.finished.emit("__NO_SYSTEM_ACTION__")
@@ -981,25 +990,7 @@ class ChatWindow(QWidget):
         self.scan_thread.finished.connect(self._receive_scan_reply)
         self.scan_thread.start()
 
-    def _receive_scan_reply(self, reply: str):
-        self.sound_manager.play_message()
-        self.set_status(True, "online")
 
-        if not reply or not reply.strip():
-            reply = "глухий канал. нічого не бачу."
-
-        if not self.messages or self.messages[-1]["speaker"] != "sndi":
-            self.messages.append(
-                {
-                    "speaker": "sndi",
-                    "text": "",
-                    "typing": True,
-                }
-            )
-
-        self.streaming_text = reply
-        self.streaming_index = 0
-        self.timer.start(12)
 
     def _receive_scan_reply(self, reply: str):
         self.sound_manager.play_message()
