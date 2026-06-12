@@ -365,10 +365,16 @@ def execute_action(plan: ActionPlan, user_text: str) -> str | None:
         from sndi.core.decision_log import record_decision
 
         return record_decision(plan.query or user_text)
+    
 
     if plan.action == "recall_decisions":
         from sndi.core.decision_log import recall_decisions
 
         return recall_decisions(plan.query or user_text)
+    
+    if plan.action == "git_summary":
+        from sndi.tools.git_tools import get_git_summary
 
+        return get_git_summary()
+    
     return None
