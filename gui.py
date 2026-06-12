@@ -49,7 +49,7 @@ from sndi.tools.project_context import build_project_snapshot
 from sndi.core.action_router import decide_action, execute_action
 from sndi.core.app_settings import load_app_settings, save_app_settings, set_app_setting
 from sndi.tools.clipboard_tools import get_clipboard_text
-from sndi.services.voice_service import VoiceListenOnceThread
+from sndi.services.voice_service import VoiceListenOnceThread, VoiceWakeLoopThread
 from sndi.tools.autostart import (
     enable_autostart,
     disable_autostart,
@@ -442,6 +442,7 @@ class ChatWindow(QWidget):
         self.web_thread: WebThread | None = None
         self.system_action_thread: SystemActionThread | None = None
         self.voice_once_thread: VoiceListenOnceThread | None = None
+        self.voice_wake_thread: VoiceWakeLoopThread | None = None
         self.streaming_text: str | None = None
         self.streaming_index = 0
         self.dot_phase = 0
@@ -727,11 +728,11 @@ class ChatWindow(QWidget):
             hide_action = QAction("Hide to tray", self)
             hide_action.triggered.connect(self._hide_to_tray)
 
-            self.tray_start_voice_action = QAction("Listen once", self)
-            self.tray_start_voice_action.triggered.connect(self._start_manual_voice_command)
+            self.tray_start_voice_action = QAction("Start listening", self)
+            self.tray_start_voice_action.triggered.connect(self._start_voice_mode)
 
-            self.tray_stop_voice_action = QAction("Stop listening (wake loop soon)", self)
-            self.tray_stop_voice_action.setEnabled(False)
+            self.tray_stop_voice_action = QAction("Stop listening", self)
+            self.tray_stop_voice_action.triggered.connect(self._stop_voice_mode)
 
             self.tray_autostart_action = QAction("Toggle autostart", self)
             self.tray_autostart_action.triggered.connect(self._toggle_autostart_from_tray)
@@ -758,6 +759,7 @@ class ChatWindow(QWidget):
             self.tray_icon.activated.connect(self._on_tray_activated)
             self.tray_icon.show()
             self._refresh_tray_autostart_label()
+            self._refresh_tray_voice_labels()
 
             print("[SNDI][TRAY] enabled")
 
@@ -818,6 +820,15 @@ class ChatWindow(QWidget):
         except Exception as error:
             print("[SNDI][TRAY AUTOSTART STATUS ERROR]", error)
             self.tray_autostart_action.setText("Autostart unavailable")
+        
+    def _refresh_tray_voice_labels(self):
+        voice_enabled = bool(self.app_settings.get("voice_enabled", False))
+
+        if self.tray_start_voice_action is not None:
+            self.tray_start_voice_action.setEnabled(not voice_enabled)
+
+        if self.tray_stop_voice_action is not None:
+            self.tray_stop_voice_action.setEnabled(voice_enabled)
 
     def _toggle_autostart_from_tray(self):
         try:
@@ -862,6 +873,113 @@ class ChatWindow(QWidget):
             self.render_messages()
 
     # ---------- voice input ----------
+    def _start_voice_mode(self):
+        """
+        Stage 7: wake word loop.
+        SNDI listens for wake word, then listens for the next command.
+        """
+        if self.voice_wake_thread is not None and self.voice_wake_thread.isRunning():
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": "я вже слухаю wake word.",
+                    "typing": False,
+                }
+            )
+            self.render_messages()
+            return
+
+        wake_word = str(self.app_settings.get("voice_wake_word", "сенді") or "сенді")
+
+        wake_words = (
+            wake_word,
+            "сенді",
+            "сенді",
+            "сенди",
+            "sndi",
+            "sandy",
+        )
+
+        self.set_status(True, "listening")
+
+        set_app_setting("voice_enabled", True)
+        self.app_settings = load_app_settings()
+        self._refresh_tray_voice_labels()
+
+        self.messages.append(
+            {
+                "speaker": "sndi",
+                "text": f"голосовий режим увімкнено. скажи «{wake_word}», потім команду.",
+                "typing": False,
+            }
+        )
+        self.render_messages()
+
+        self.voice_wake_thread = VoiceWakeLoopThread(
+            wake_words=wake_words,
+            language="uk-UA",
+        )
+        self.voice_wake_thread.status_changed.connect(self._on_voice_status_changed)
+        self.voice_wake_thread.wake_detected.connect(self._on_voice_wake_detected)
+        self.voice_wake_thread.command_recognized.connect(self._on_voice_command_recognized)
+        self.voice_wake_thread.error.connect(self._on_voice_error)
+        self.voice_wake_thread.finished.connect(self._on_voice_wake_finished)
+        self.voice_wake_thread.start()
+
+    def _stop_voice_mode(self):
+        """
+        Stop wake word loop.
+        """
+        set_app_setting("voice_enabled", False)
+        self.app_settings = load_app_settings()
+        self._refresh_tray_voice_labels()
+
+        if self.voice_wake_thread is not None and self.voice_wake_thread.isRunning():
+            self.voice_wake_thread.request_stop()
+            self.voice_wake_thread.wait(1500)
+
+        self.voice_wake_thread = None
+        self.set_status(True, "voice off")
+
+        self.messages.append(
+            {
+                "speaker": "sndi",
+                "text": "голосовий режим вимкнено.",
+                "typing": False,
+            }
+        )
+        self.render_messages()
+
+    def _toggle_voice_mode(self):
+        voice_enabled = bool(self.app_settings.get("voice_enabled", False))
+
+        if voice_enabled:
+            self._stop_voice_mode()
+        else:
+            self._start_voice_mode()
+
+    def _on_voice_wake_detected(self, wake_text: str):
+        wake_text = (wake_text or "").strip()
+
+        print("[SNDI][WAKE DETECTED]", wake_text)
+
+        self.set_status(True, "wake detected")
+
+        self.messages.append(
+            {
+                "speaker": "sndi",
+                "text": f"я тут. почула wake word: {wake_text}",
+                "typing": False,
+            }
+        )
+        self.render_messages()
+
+    def _on_voice_wake_finished(self):
+        self.set_status(True, "voice off")
+        set_app_setting("voice_enabled", False)
+        self.app_settings = load_app_settings()
+        self._refresh_tray_voice_labels()
+
     def _start_manual_voice_command(self):
         """
         Stage 6: one-shot voice command.
@@ -1268,6 +1386,18 @@ class ChatWindow(QWidget):
             self._start_manual_voice_command()
             return
         
+        if plan.action == "voice_start":
+            self._start_voice_mode()
+            return
+
+        if plan.action == "voice_stop":
+            self._stop_voice_mode()
+            return
+
+        if plan.action == "voice_toggle":
+            self._toggle_voice_mode()
+            return
+    
         if plan.action == "autostart_enable":
             reply = enable_autostart()
             set_app_setting("autostart_enabled", True)

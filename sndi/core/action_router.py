@@ -355,6 +355,62 @@ def decide_action(user_text: str) -> ActionPlan:
             requires_confirmation=False,
             reason="user wants one-shot voice command input",
         )
+    
+    if any(
+        phrase in text
+        for phrase in (
+            "почни слухати",
+            "слухай мене",
+            "увімкни голос",
+            "включи голос",
+            "start listening",
+            "voice on",
+        )
+    ):
+        return ActionPlan(
+            action="voice_start",
+            target="microphone",
+            query=user_text,
+            confidence=0.95,
+            requires_confirmation=False,
+            reason="user wants to start wake word voice mode",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
+            "перестань слухати",
+            "вимкни голос",
+            "відключи голос",
+            "stop listening",
+            "voice off",
+        )
+    ):
+        return ActionPlan(
+            action="voice_stop",
+            target="microphone",
+            query=user_text,
+            confidence=0.95,
+            requires_confirmation=False,
+            reason="user wants to stop wake word voice mode",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
+            "перемкни голос",
+            "toggle voice",
+            "voice toggle",
+        )
+    ):
+        return ActionPlan(
+            action="voice_toggle",
+            target="microphone",
+            query=user_text,
+            confidence=0.9,
+            requires_confirmation=False,
+            reason="user wants to toggle voice mode",
+        )
 
     if looks_like_system_request(user_text):
         return ActionPlan(
