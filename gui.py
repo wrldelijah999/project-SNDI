@@ -47,8 +47,14 @@ from sndi.core.intents import is_screen_scan_intent, is_project_awareness_intent
 from sndi.tools.system_control import run_system_control_from_text
 from sndi.tools.project_context import build_project_snapshot
 from sndi.core.action_router import decide_action, execute_action
-from sndi.core.app_settings import load_app_settings, save_app_settings
+from sndi.core.app_settings import load_app_settings, save_app_settings, set_app_setting
 from sndi.tools.clipboard_tools import get_clipboard_text
+from sndi.tools.autostart import (
+    enable_autostart,
+    disable_autostart,
+    get_autostart_status,
+    is_autostart_enabled,
+)
 from sndi.services.openai_service import (
     analyze_image,
     analyze_project_snapshot,
@@ -57,6 +63,7 @@ from sndi.services.openai_service import (
     decide_system_action,
     looks_like_system_request
 )
+
 
 try:
     import pygame
@@ -724,8 +731,8 @@ class ChatWindow(QWidget):
             self.tray_stop_voice_action = QAction("Stop listening (soon)", self)
             self.tray_stop_voice_action.setEnabled(False)
 
-            self.tray_autostart_action = QAction("Autostart settings (next stage)", self)
-            self.tray_autostart_action.setEnabled(False)
+            self.tray_autostart_action = QAction("Toggle autostart", self)
+            self.tray_autostart_action.triggered.connect(self._toggle_autostart_from_tray)
 
             self.tray_status_action = QAction("Status: online", self)
             self.tray_status_action.setEnabled(False)
@@ -748,6 +755,7 @@ class ChatWindow(QWidget):
             self.tray_icon.setContextMenu(self.tray_menu)
             self.tray_icon.activated.connect(self._on_tray_activated)
             self.tray_icon.show()
+            self._refresh_tray_autostart_label()
 
             print("[SNDI][TRAY] enabled")
 
@@ -794,6 +802,62 @@ class ChatWindow(QWidget):
 
         if app is not None:
             app.quit()
+
+    def _refresh_tray_autostart_label(self):
+        if self.tray_autostart_action is None:
+            return
+
+        try:
+            if is_autostart_enabled():
+                self.tray_autostart_action.setText("Disable autostart")
+            else:
+                self.tray_autostart_action.setText("Enable autostart")
+
+        except Exception as error:
+            print("[SNDI][TRAY AUTOSTART STATUS ERROR]", error)
+            self.tray_autostart_action.setText("Autostart unavailable")
+
+    def _toggle_autostart_from_tray(self):
+        try:
+            if is_autostart_enabled():
+                reply = disable_autostart()
+                set_app_setting("autostart_enabled", False)
+            else:
+                reply = enable_autostart()
+                set_app_setting("autostart_enabled", True)
+
+            self.app_settings = load_app_settings()
+            self._refresh_tray_autostart_label()
+
+            if self.tray_icon is not None:
+                self.tray_icon.showMessage(
+                    "SNDI",
+                    reply,
+                    QSystemTrayIcon.MessageIcon.Information,
+                    2500,
+                )
+
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": reply,
+                    "typing": False,
+                }
+            )
+            self.render_messages()
+
+        except Exception as error:
+            error_text = f"не змогла перемкнути автозапуск: {error}"
+            print("[SNDI][AUTOSTART TOGGLE ERROR]", error)
+
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": error_text,
+                    "typing": False,
+                }
+            )
+            self.render_messages()
 
     # ---------- dialogs & logs for SystemManager ----------
     def confirm_dialog(self, prompt: str) -> bool:
@@ -1112,6 +1176,54 @@ class ChatWindow(QWidget):
 
         if plan.action == "project_awareness":
             self._start_project_awareness(user_text)
+            return
+        
+        if plan.action == "autostart_enable":
+            reply = enable_autostart()
+            set_app_setting("autostart_enabled", True)
+            self.app_settings = load_app_settings()
+            self._refresh_tray_autostart_label()
+
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": reply,
+                    "typing": False,
+                }
+            )
+            self.render_messages()
+            return
+
+        if plan.action == "autostart_disable":
+            reply = disable_autostart()
+            set_app_setting("autostart_enabled", False)
+            self.app_settings = load_app_settings()
+            self._refresh_tray_autostart_label()
+
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": reply,
+                    "typing": False,
+                }
+            )
+            self.render_messages()
+            return
+
+        if plan.action == "autostart_status":
+            reply = get_autostart_status()
+            set_app_setting("autostart_enabled", is_autostart_enabled())
+            self.app_settings = load_app_settings()
+            self._refresh_tray_autostart_label()
+
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": reply,
+                    "typing": False,
+                }
+            )
+            self.render_messages()
             return
 
         if plan.action == "clipboard_explain":

@@ -124,26 +124,6 @@ def decide_action(user_text: str) -> ActionPlan:
             reason="user asks to recall previous decisions",
         )
 
-    if any(
-        phrase in text
-        for phrase in (
-            "що в буфері",
-            "в буфері",
-            "буфер обміну",
-            "скопійоване",
-            "clipboard",
-            "поясни це",
-            "поясни скопійоване",
-        )
-    ):
-        return ActionPlan(
-            action="clipboard_explain",
-            target="clipboard",
-            query=user_text,
-            confidence=0.85,
-            requires_confirmation=False,
-            reason="user refers to clipboard/copied content",
-        )
 
     if any(
         phrase in text
@@ -295,6 +275,66 @@ def decide_action(user_text: str) -> ActionPlan:
             confidence=0.9,
             requires_confirmation=False,
             reason="user wants daily debrief",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
+            "увімкни автозапуск",
+            "включи автозапуск",
+            "запускайся разом з windows",
+            "запускайся разом із windows",
+            "запускайся при старті windows",
+            "autostart on",
+            "enable autostart",
+        )
+    ):
+        return ActionPlan(
+            action="autostart_enable",
+            target="windows_startup",
+            query=user_text,
+            confidence=0.95,
+            requires_confirmation=False,
+            reason="user wants to enable Windows autostart",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
+            "вимкни автозапуск",
+            "відключи автозапуск",
+            "не запускайся разом з windows",
+            "не запускайся разом із windows",
+            "не запускайся при старті windows",
+            "autostart off",
+            "disable autostart",
+        )
+    ):
+        return ActionPlan(
+            action="autostart_disable",
+            target="windows_startup",
+            query=user_text,
+            confidence=0.95,
+            requires_confirmation=False,
+            reason="user wants to disable Windows autostart",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
+            "статус автозапуску",
+            "чи увімкнений автозапуск",
+            "чи включений автозапуск",
+            "autostart status",
+        )
+    ):
+        return ActionPlan(
+            action="autostart_status",
+            target="windows_startup",
+            query=user_text,
+            confidence=0.95,
+            requires_confirmation=False,
+            reason="user asks for Windows autostart status",
         )
 
     if looks_like_system_request(user_text):
