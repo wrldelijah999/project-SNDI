@@ -180,6 +180,29 @@ class ConfirmationManager:
 
     def has_pending_action(self) -> bool:
         return self.get_pending_action() is not None
+    
+    def has_any_pending_action(self) -> bool:
+        """
+        True even if pending action is already expired.
+
+        Used by GUI to decide whether confirmation/cancel words
+        should be intercepted before normal ActionRouter.
+        """
+        return self._pending_action is not None
+
+    def pop_expired_pending_action(self) -> PendingAction | None:
+        """
+        Return and clear expired pending action if it exists.
+        """
+        if self._pending_action is None:
+            return None
+
+        if not self._pending_action.is_expired():
+            return None
+
+        expired = self._pending_action
+        self._pending_action = None
+        return expired
 
     def clear_pending_action(self) -> None:
         self._pending_action = None

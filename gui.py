@@ -65,6 +65,17 @@ from sndi.services.openai_service import (
     decide_system_action,
     looks_like_system_request
 )
+from sndi.core.action_log import append_action_log
+from sndi.core.confirmation import (
+    ConfirmationManager,
+    PendingAction,
+    format_no_pending_action_message,
+    format_pending_action_cancelled_message,
+    format_pending_action_expired_message,
+    format_pending_action_message,
+    is_cancel_text,
+    is_confirmation_text,
+)
 
 
 try:
@@ -450,6 +461,8 @@ class ChatWindow(QWidget):
         self.dot_phase = 0
         # local app settings for v1.10 voice/tray/autostart
         self.app_settings = load_app_settings()
+        # v1.11 confirmation layer for safe mutation actions
+        self.confirmation_manager = ConfirmationManager()
 
         # tray state
         self.force_quit = False
@@ -1358,6 +1371,150 @@ class ChatWindow(QWidget):
         self.chat_area.setHtml("".join(html_parts))
         self.chat_area.moveCursor(QTextCursor.MoveOperation.End)
 
+    def _append_sndi_message(self, text: str):
+        self.messages.append(
+            {
+                "speaker": "sndi",
+                "text": text,
+                "typing": False,
+            }
+        )
+        self.render_messages()
+
+    def _handle_confirmation_intent(self, user_text: str) -> bool:
+        """
+        Handle confirm/cancel only when there is a pending action.
+
+        Returns True when the user_text was consumed by confirmation flow.
+        """
+        if not self.confirmation_manager.has_any_pending_action():
+            return False
+
+        if not is_confirmation_text(user_text) and not is_cancel_text(user_text):
+            return False
+
+        expired_action = self.confirmation_manager.pop_expired_pending_action()
+
+        if expired_action is not None:
+            append_action_log(
+                action=expired_action.action,
+                status="cancelled",
+                target=expired_action.target,
+                user_text=user_text,
+                preview=expired_action.preview,
+                error="pending action expired",
+                metadata={"pending_id": expired_action.id},
+            )
+            self._append_sndi_message(format_pending_action_expired_message())
+            return True
+
+        if is_cancel_text(user_text):
+            pending_action = self.confirmation_manager.cancel_pending_action()
+
+            append_action_log(
+                action=pending_action.action if pending_action else "unknown_pending_action",
+                status="cancelled",
+                target=pending_action.target if pending_action else None,
+                user_text=user_text,
+                preview=pending_action.preview if pending_action else {},
+                metadata={
+                    "pending_id": pending_action.id if pending_action else None,
+                    "reason": "user_cancelled",
+                },
+            )
+
+            self._append_sndi_message(
+                format_pending_action_cancelled_message(pending_action)
+            )
+            return True
+
+        if is_confirmation_text(user_text):
+            pending_action = self.confirmation_manager.confirm_pending_action()
+
+            if pending_action is None:
+                append_action_log(
+                    action="confirm_pending_action",
+                    status="failed",
+                    target=None,
+                    user_text=user_text,
+                    error="no active pending action",
+                )
+                self._append_sndi_message(format_no_pending_action_message())
+                return True
+
+            append_action_log(
+                action=pending_action.action,
+                status="confirmed",
+                target=pending_action.target,
+                user_text=user_text,
+                preview=pending_action.preview,
+                metadata={"pending_id": pending_action.id},
+            )
+
+            reply = self._execute_confirmed_pending_action(pending_action)
+            self._append_sndi_message(reply)
+            return True
+
+        return False
+
+    def _create_pending_action_from_preview(
+        self,
+        preview,
+        params: dict | None = None,
+        user_text: str = "",
+    ):
+        """
+        Create pending action from FileOpPreview-like object.
+
+        Stage 10:
+        - creates pending action;
+        - writes requested event to action log;
+        - shows confirmation message;
+        - does not execute anything yet.
+        """
+        pending_action = self.confirmation_manager.create_pending_action(
+            action=preview.action,
+            target=preview.target,
+            params=params or {},
+            preview=preview.preview,
+            risk_level=preview.risk_level,
+            user_text=user_text,
+        )
+
+        append_action_log(
+            action=pending_action.action,
+            status="requested",
+            target=pending_action.target,
+            user_text=user_text,
+            preview=pending_action.preview,
+            metadata={"pending_id": pending_action.id},
+        )
+
+        self._append_sndi_message(format_pending_action_message(pending_action))
+        return pending_action
+
+    def _execute_confirmed_pending_action(self, pending_action: PendingAction) -> str:
+        """
+        Stage 10 placeholder.
+
+        Real mutation execution will be connected in Stage 12.
+        For now this confirms safely and changes nothing.
+        """
+        append_action_log(
+            action=pending_action.action,
+            status="failed",
+            target=pending_action.target,
+            user_text=pending_action.user_text,
+            preview=pending_action.preview,
+            error="executor_not_connected_yet_stage_10",
+            metadata={"pending_id": pending_action.id},
+        )
+
+        return (
+            "підтвердження прийнято, але executor ще не підключений.\n"
+            "На цьому stage нічого не змінено. Реальне виконання буде на Stage 12."
+        )
+
     # ---------- events ----------
     def send_message(self):
         user_text = self.input_field.text().strip()
@@ -1441,6 +1598,10 @@ class ChatWindow(QWidget):
                 }
             )
             self.render_messages()
+
+            if self._handle_confirmation_intent(user_text):
+                return
+            
             self._hide_to_tray()
             return
 
