@@ -2,18 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 import os
-import sys
+
+from sndi.core.app_paths import is_frozen
+from sndi.tools.windows_shortcuts import get_shortcut_launch_parts
 
 
 AUTOSTART_FILENAME = "SNDI.cmd"
-
-
-def get_project_root() -> Path:
-    """
-    Resolve project root from this file:
-    sndi/tools/autostart.py -> project root is parents[2].
-    """
-    return Path(__file__).resolve().parents[2]
 
 
 def get_startup_folder() -> Path:
@@ -40,47 +34,42 @@ def get_autostart_file_path() -> Path:
     return get_startup_folder() / AUTOSTART_FILENAME
 
 
-def _resolve_python_executable() -> Path:
+def _build_cmd_content() -> str:
     """
-    Prefer pythonw.exe to avoid opening a console window on Windows.
-    Fallback to current python executable.
+    Build Startup .cmd content.
+
+    v1.11 behavior:
+    - if running frozen exe: launch current SNDI.exe;
+    - if dist/SNDI/SNDI.exe exists in dev project: launch built exe;
+    - fallback: launch pythonw/python run.py.
     """
-    current = Path(sys.executable).resolve()
-    pythonw = current.with_name("pythonw.exe")
+    target, arguments, working_dir = get_shortcut_launch_parts()
 
-    if pythonw.exists():
-        return pythonw
-
-    return current
-
-
-def _build_cmd_content(project_root: Path) -> str:
-    python_exe = _resolve_python_executable()
-    run_py = project_root / "run.py"
+    if arguments:
+        launch_line = f'start "" "{target}" {arguments}'
+    else:
+        launch_line = f'start "" "{target}"'
 
     return (
         "@echo off\n"
-        f'cd /d "{project_root}"\n'
-        f'start "" "{python_exe}" "{run_py}"\n'
+        f'cd /d "{working_dir}"\n'
+        f"{launch_line}\n"
     )
 
 
 def enable_autostart(project_root: str | Path | None = None) -> str:
     """
     Enable SNDI autostart by creating SNDI.cmd in user's Startup folder.
+
+    project_root is kept for backward compatibility with v1.10 calls,
+    but v1.11 resolves launch target automatically.
     """
-    root = Path(project_root).resolve() if project_root else get_project_root()
-    run_py = root / "run.py"
-
-    if not run_py.exists():
-        return f"не змогла увімкнути автозапуск: не знайдено run.py у {root}"
-
     startup_folder = get_startup_folder()
     startup_folder.mkdir(parents=True, exist_ok=True)
 
     autostart_file = get_autostart_file_path()
     autostart_file.write_text(
-        _build_cmd_content(root),
+        _build_cmd_content(),
         encoding="utf-8",
     )
 
@@ -106,8 +95,36 @@ def is_autostart_enabled() -> bool:
 
 def get_autostart_status() -> str:
     autostart_file = get_autostart_file_path()
+    target, arguments, working_dir = get_shortcut_launch_parts()
+
+    mode = "frozen_exe" if is_frozen() else "dev"
 
     if autostart_file.exists():
-        return f"автозапуск активний: {autostart_file}"
+        return (
+            "автозапуск активний:\n"
+            f"- file: {autostart_file}\n"
+            f"- mode: {mode}\n"
+            f"- target: {target}\n"
+            f"- arguments: {arguments or '(none)'}\n"
+            f"- working dir: {working_dir}"
+        )
 
-    return "автозапуск вимкнено."
+    return (
+        "автозапуск вимкнено.\n"
+        f"- mode: {mode}\n"
+        f"- next target: {target}\n"
+        f"- arguments: {arguments or '(none)'}\n"
+        f"- working dir: {working_dir}"
+    )
+
+
+def read_autostart_file() -> str:
+    """
+    Debug helper for tests.
+    """
+    autostart_file = get_autostart_file_path()
+
+    if not autostart_file.exists():
+        return ""
+
+    return autostart_file.read_text(encoding="utf-8", errors="replace")
