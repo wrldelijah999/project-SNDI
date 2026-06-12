@@ -19,6 +19,8 @@ from PyQt6.QtWidgets import (
     QGraphicsDropShadowEffect,
     QSpacerItem,
     QMessageBox,
+    QSystemTrayIcon,
+    QMenu
 )
 
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QUrl
@@ -32,6 +34,8 @@ from PyQt6.QtGui import (
     QBrush,
     QTextCursor,
     QDesktopServices,
+    QIcon,
+    QAction
 )
 
 from sndi.core.conversation_core import ask
@@ -435,6 +439,16 @@ class ChatWindow(QWidget):
         # local app settings for v1.10 voice/tray/autostart
         self.app_settings = load_app_settings()
 
+        # tray state
+        self.force_quit = False
+        self._tray_notice_shown = False
+        self.tray_icon: QSystemTrayIcon | None = None
+        self.tray_menu: QMenu | None = None
+        self.tray_status_action: QAction | None = None
+        self.tray_start_voice_action: QAction | None = None
+        self.tray_stop_voice_action: QAction | None = None
+        self.tray_autostart_action: QAction | None = None
+
         self.timer = QTimer()
         self.timer.timeout.connect(self._on_timer)
 
@@ -445,6 +459,7 @@ class ChatWindow(QWidget):
         )
 
         self._build_ui()
+        self._setup_tray()
 
     # ---------- UI builder ----------
     def _build_ui(self):
@@ -620,6 +635,8 @@ class ChatWindow(QWidget):
             background: #29fca5;
             """
         )
+        if self.tray_status_action is not None:
+            self.tray_status_action.setText(f"Status: {status_text}")
 
         self.status_label = QLabel("online")
         self.status_label.setFont(
@@ -663,6 +680,120 @@ class ChatWindow(QWidget):
             background: {color};
             """
         )
+
+    # ---------- system tray ----------
+    def _setup_tray(self):
+        """
+        Create Windows system tray presence for SNDI.
+
+        Stage 4:
+        - show/hide/quit works
+        - voice/autostart menu items are placeholders for later stages
+        """
+        if not self.app_settings.get("tray_enabled", True):
+            print("[SNDI][TRAY] disabled in app settings")
+            return
+
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            print("[SNDI][TRAY] system tray is not available")
+            return
+
+        try:
+            self.tray_icon = QSystemTrayIcon(self)
+            self.tray_icon.setToolTip("SNDI — online")
+
+            icon = QIcon(load_avatar_pixmap(64))
+
+            if icon.isNull():
+                icon = self.windowIcon()
+
+            self.tray_icon.setIcon(icon)
+            self.setWindowIcon(icon)
+
+            self.tray_menu = QMenu(self)
+
+            show_action = QAction("Show SNDI", self)
+            show_action.triggered.connect(self._show_from_tray)
+
+            hide_action = QAction("Hide to tray", self)
+            hide_action.triggered.connect(self._hide_to_tray)
+
+            self.tray_start_voice_action = QAction("Start listening (soon)", self)
+            self.tray_start_voice_action.setEnabled(False)
+
+            self.tray_stop_voice_action = QAction("Stop listening (soon)", self)
+            self.tray_stop_voice_action.setEnabled(False)
+
+            self.tray_autostart_action = QAction("Autostart settings (next stage)", self)
+            self.tray_autostart_action.setEnabled(False)
+
+            self.tray_status_action = QAction("Status: online", self)
+            self.tray_status_action.setEnabled(False)
+
+            quit_action = QAction("Quit", self)
+            quit_action.triggered.connect(self._quit_from_tray)
+
+            self.tray_menu.addAction(show_action)
+            self.tray_menu.addAction(hide_action)
+            self.tray_menu.addSeparator()
+            self.tray_menu.addAction(self.tray_start_voice_action)
+            self.tray_menu.addAction(self.tray_stop_voice_action)
+            self.tray_menu.addSeparator()
+            self.tray_menu.addAction(self.tray_autostart_action)
+            self.tray_menu.addSeparator()
+            self.tray_menu.addAction(self.tray_status_action)
+            self.tray_menu.addSeparator()
+            self.tray_menu.addAction(quit_action)
+
+            self.tray_icon.setContextMenu(self.tray_menu)
+            self.tray_icon.activated.connect(self._on_tray_activated)
+            self.tray_icon.show()
+
+            print("[SNDI][TRAY] enabled")
+
+        except Exception as error:
+            print("[SNDI][TRAY ERROR]", error)
+            self.tray_icon = None
+            self.tray_menu = None
+
+    def _on_tray_activated(self, reason):
+        """
+        Left click / double click on tray icon restores the window.
+        """
+        if reason in (
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+        ):
+            self._show_from_tray()
+
+    def _show_from_tray(self):
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.set_status(True, "online")
+
+    def _hide_to_tray(self):
+        self.hide()
+
+        if self.tray_icon is not None and not self._tray_notice_shown:
+            self.tray_icon.showMessage(
+                "SNDI",
+                "я в треї. клацни по іконці, щоб повернути вікно.",
+                QSystemTrayIcon.MessageIcon.Information,
+                2500,
+            )
+            self._tray_notice_shown = True
+
+    def _quit_from_tray(self):
+        self.force_quit = True
+
+        if self.tray_icon is not None:
+            self.tray_icon.hide()
+
+        app = QApplication.instance()
+
+        if app is not None:
+            app.quit()
 
     # ---------- dialogs & logs for SystemManager ----------
     def confirm_dialog(self, prompt: str) -> bool:
@@ -1482,6 +1613,25 @@ class ChatWindow(QWidget):
 
         self.messages[-1]["typing"] = False
         self.timer.stop()
+
+    def closeEvent(self, event):
+        """
+        If minimize_to_tray is enabled, closing the window hides it to tray.
+        Real exit is available from tray menu: Quit.
+        """
+        minimize_to_tray = self.app_settings.get("minimize_to_tray", True)
+
+        if (
+            not self.force_quit
+            and minimize_to_tray
+            and self.tray_icon is not None
+            and self.tray_icon.isVisible()
+        ):
+            event.ignore()
+            self._hide_to_tray()
+            return
+
+        event.accept()
 
     def start_voice_input(self):
         """
