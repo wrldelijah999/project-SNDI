@@ -124,26 +124,6 @@ def decide_action(user_text: str) -> ActionPlan:
             reason="user asks to recall previous decisions",
         )
 
-    if any(
-        phrase in text
-        for phrase in (
-            "що в буфері",
-            "в буфері",
-            "буфер обміну",
-            "скопійоване",
-            "clipboard",
-            "поясни це",
-            "поясни скопійоване",
-        )
-    ):
-        return ActionPlan(
-            action="clipboard_explain",
-            target="clipboard",
-            query=user_text,
-            confidence=0.85,
-            requires_confirmation=False,
-            reason="user refers to clipboard/copied content",
-        )
 
     if any(
         phrase in text
@@ -297,6 +277,197 @@ def decide_action(user_text: str) -> ActionPlan:
             reason="user wants daily debrief",
         )
 
+    if any(
+        phrase in text
+        for phrase in (
+            "увімкни автозапуск",
+            "включи автозапуск",
+            "запускайся разом з windows",
+            "запускайся разом із windows",
+            "запускайся при старті windows",
+            "autostart on",
+            "enable autostart",
+        )
+    ):
+        return ActionPlan(
+            action="autostart_enable",
+            target="windows_startup",
+            query=user_text,
+            confidence=0.95,
+            requires_confirmation=False,
+            reason="user wants to enable Windows autostart",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
+            "вимкни автозапуск",
+            "відключи автозапуск",
+            "не запускайся разом з windows",
+            "не запускайся разом із windows",
+            "не запускайся при старті windows",
+            "autostart off",
+            "disable autostart",
+        )
+    ):
+        return ActionPlan(
+            action="autostart_disable",
+            target="windows_startup",
+            query=user_text,
+            confidence=0.95,
+            requires_confirmation=False,
+            reason="user wants to disable Windows autostart",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
+            "статус автозапуску",
+            "чи увімкнений автозапуск",
+            "чи включений автозапуск",
+            "autostart status",
+        )
+    ):
+        return ActionPlan(
+            action="autostart_status",
+            target="windows_startup",
+            query=user_text,
+            confidence=0.95,
+            requires_confirmation=False,
+            reason="user asks for Windows autostart status",
+        )
+    
+    if any(
+        phrase in text
+        for phrase in (
+            "увімкни озвучку",
+            "включи озвучку",
+            "озвучуй відповіді",
+            "tts on",
+            "speak replies on",
+        )
+    ):
+        return ActionPlan(
+            action="voice_reply_enable",
+            target="tts",
+            query=user_text,
+            confidence=0.95,
+            requires_confirmation=False,
+            reason="user wants to enable voice replies",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
+            "вимкни озвучку",
+            "відключи озвучку",
+            "не озвучуй відповіді",
+            "tts off",
+            "speak replies off",
+        )
+    ):
+        return ActionPlan(
+            action="voice_reply_disable",
+            target="tts",
+            query=user_text,
+            confidence=0.95,
+            requires_confirmation=False,
+            reason="user wants to disable voice replies",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
+            "статус озвучки",
+            "чи увімкнена озвучка",
+            "tts status",
+            "speak replies status",
+        )
+    ):
+        return ActionPlan(
+            action="voice_reply_status",
+            target="tts",
+            query=user_text,
+            confidence=0.95,
+            requires_confirmation=False,
+            reason="user asks for voice reply status",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
+            "слухай команду",
+            "прослухай команду",
+            "голосова команда",
+            "listen once",
+            "voice command",
+        )
+    ):
+        return ActionPlan(
+            action="voice_once",
+            target="microphone",
+            query=user_text,
+            confidence=0.95,
+            requires_confirmation=False,
+            reason="user wants one-shot voice command input",
+        )
+    
+    if any(
+        phrase in text
+        for phrase in (
+            "почни слухати",
+            "слухай мене",
+            "увімкни голос",
+            "включи голос",
+            "start listening",
+            "voice on",
+        )
+    ):
+        return ActionPlan(
+            action="voice_start",
+            target="microphone",
+            query=user_text,
+            confidence=0.95,
+            requires_confirmation=False,
+            reason="user wants to start wake word voice mode",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
+            "перестань слухати",
+            "вимкни голос",
+            "відключи голос",
+            "stop listening",
+            "voice off",
+        )
+    ):
+        return ActionPlan(
+            action="voice_stop",
+            target="microphone",
+            query=user_text,
+            confidence=0.95,
+            requires_confirmation=False,
+            reason="user wants to stop wake word voice mode",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
+            "перемкни голос",
+            "toggle voice",
+            "voice toggle",
+        )
+    ):
+        return ActionPlan(
+            action="voice_toggle",
+            target="microphone",
+            query=user_text,
+            confidence=0.9,
+            requires_confirmation=False,
+            reason="user wants to toggle voice mode",
+        )
+
     if looks_like_system_request(user_text):
         return ActionPlan(
             action="system_action",
@@ -304,6 +475,44 @@ def decide_action(user_text: str) -> ActionPlan:
             confidence=0.82,
             requires_confirmation=False,
             reason="message looks like a local system action",
+        )
+    
+    if any(
+        phrase in text
+        for phrase in (
+            "сховайся в трей",
+            "сховай в трей",
+            "згорнись в трей",
+            "hide to tray",
+            "minimize to tray",
+        )
+    ):
+        return ActionPlan(
+            action="tray_hide",
+            target="system_tray",
+            query=user_text,
+            confidence=0.95,
+            requires_confirmation=False,
+            reason="user wants to hide SNDI to tray",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
+            "відкрийся з трея",
+            "покажи вікно",
+            "поверни вікно",
+            "show window",
+            "show sndi",
+        )
+    ):
+        return ActionPlan(
+            action="tray_show",
+            target="system_tray",
+            query=user_text,
+            confidence=0.95,
+            requires_confirmation=False,
+            reason="user wants to show SNDI window from tray",
         )
 
     if is_project_awareness_intent(user_text):

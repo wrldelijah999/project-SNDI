@@ -19,6 +19,8 @@ from PyQt6.QtWidgets import (
     QGraphicsDropShadowEffect,
     QSpacerItem,
     QMessageBox,
+    QSystemTrayIcon,
+    QMenu
 )
 
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QUrl
@@ -32,6 +34,8 @@ from PyQt6.QtGui import (
     QBrush,
     QTextCursor,
     QDesktopServices,
+    QIcon,
+    QAction
 )
 
 from sndi.core.conversation_core import ask
@@ -43,7 +47,16 @@ from sndi.core.intents import is_screen_scan_intent, is_project_awareness_intent
 from sndi.tools.system_control import run_system_control_from_text
 from sndi.tools.project_context import build_project_snapshot
 from sndi.core.action_router import decide_action, execute_action
+from sndi.core.app_settings import load_app_settings, save_app_settings, set_app_setting
 from sndi.tools.clipboard_tools import get_clipboard_text
+from sndi.services.voice_reply_service import VoiceReplyThread
+from sndi.services.voice_service import VoiceListenOnceThread, VoiceWakeLoopThread
+from sndi.tools.autostart import (
+    enable_autostart,
+    disable_autostart,
+    get_autostart_status,
+    is_autostart_enabled,
+)
 from sndi.services.openai_service import (
     analyze_image,
     analyze_project_snapshot,
@@ -52,6 +65,7 @@ from sndi.services.openai_service import (
     decide_system_action,
     looks_like_system_request
 )
+
 
 try:
     import pygame
@@ -428,9 +442,25 @@ class ChatWindow(QWidget):
         self.project_thread: ProjectThread | None = None
         self.web_thread: WebThread | None = None
         self.system_action_thread: SystemActionThread | None = None
+        self.voice_once_thread: VoiceListenOnceThread | None = None
+        self.voice_wake_thread: VoiceWakeLoopThread | None = None
+        self.voice_reply_thread: VoiceReplyThread | None = None
         self.streaming_text: str | None = None
         self.streaming_index = 0
         self.dot_phase = 0
+        # local app settings for v1.10 voice/tray/autostart
+        self.app_settings = load_app_settings()
+
+        # tray state
+        self.force_quit = False
+        self._tray_notice_shown = False
+        self.tray_icon: QSystemTrayIcon | None = None
+        self.tray_menu: QMenu | None = None
+        self.tray_status_action: QAction | None = None
+        self.tray_start_voice_action: QAction | None = None
+        self.tray_listen_once_action: QAction | None = None
+        self.tray_stop_voice_action: QAction | None = None
+        self.tray_autostart_action: QAction | None = None
 
         self.timer = QTimer()
         self.timer.timeout.connect(self._on_timer)
@@ -442,6 +472,7 @@ class ChatWindow(QWidget):
         )
 
         self._build_ui()
+        self._setup_tray()
 
     # ---------- UI builder ----------
     def _build_ui(self):
@@ -617,6 +648,8 @@ class ChatWindow(QWidget):
             background: #29fca5;
             """
         )
+        if self.tray_status_action is not None:
+            self.tray_status_action.setText(f"Status: {status_text}")
 
         self.status_label = QLabel("online")
         self.status_label.setFont(
@@ -660,6 +693,408 @@ class ChatWindow(QWidget):
             background: {color};
             """
         )
+
+    # ---------- system tray ----------
+    def _setup_tray(self):
+        """
+        Create Windows system tray presence for SNDI.
+
+        Stage 4:
+        - show/hide/quit works
+        - voice/autostart menu items are placeholders for later stages
+        """
+        if not self.app_settings.get("tray_enabled", True):
+            print("[SNDI][TRAY] disabled in app settings")
+            return
+
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            print("[SNDI][TRAY] system tray is not available")
+            return
+
+        try:
+            self.tray_icon = QSystemTrayIcon(self)
+            self.tray_icon.setToolTip("SNDI — online")
+
+            icon = QIcon(load_avatar_pixmap(64))
+
+            if icon.isNull():
+                icon = self.windowIcon()
+
+            self.tray_icon.setIcon(icon)
+            self.setWindowIcon(icon)
+
+            self.tray_menu = QMenu(self)
+
+            show_action = QAction("Show SNDI", self)
+            show_action.triggered.connect(self._show_from_tray)
+
+            hide_action = QAction("Hide to tray", self)
+            hide_action.triggered.connect(self._hide_to_tray)
+
+            self.tray_listen_once_action = QAction("Listen once", self)
+            self.tray_listen_once_action.triggered.connect(self._start_manual_voice_command)
+
+            self.tray_start_voice_action = QAction("Start wake listening", self)
+            self.tray_start_voice_action.triggered.connect(self._start_voice_mode)
+
+            self.tray_stop_voice_action = QAction("Stop wake listening", self)
+            self.tray_stop_voice_action.triggered.connect(self._stop_voice_mode)
+
+            self.tray_autostart_action = QAction("Toggle autostart", self)
+            self.tray_autostart_action.triggered.connect(self._toggle_autostart_from_tray)
+
+            self.tray_status_action = QAction("Status: online", self)
+            self.tray_status_action.setEnabled(False)
+
+            quit_action = QAction("Quit", self)
+            quit_action.triggered.connect(self._quit_from_tray)
+
+            self.tray_menu.addAction(show_action)
+            self.tray_menu.addAction(hide_action)
+            self.tray_menu.addSeparator()
+            self.tray_menu.addAction(self.tray_listen_once_action)
+            self.tray_menu.addAction(self.tray_start_voice_action)
+            self.tray_menu.addAction(self.tray_stop_voice_action)
+            self.tray_menu.addSeparator()
+            self.tray_menu.addAction(self.tray_autostart_action)
+            self.tray_menu.addSeparator()
+            self.tray_menu.addAction(self.tray_status_action)
+            self.tray_menu.addSeparator()
+            self.tray_menu.addAction(quit_action)
+
+            self.tray_icon.setContextMenu(self.tray_menu)
+            self.tray_icon.activated.connect(self._on_tray_activated)
+            self.tray_icon.show()
+            self._refresh_tray_autostart_label()
+            self._refresh_tray_voice_labels()
+
+            print("[SNDI][TRAY] enabled")
+
+        except Exception as error:
+            print("[SNDI][TRAY ERROR]", error)
+            self.tray_icon = None
+            self.tray_menu = None
+
+    def _on_tray_activated(self, reason):
+        """
+        Left click / double click on tray icon restores the window.
+        """
+        if reason in (
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+        ):
+            self._show_from_tray()
+
+    def _show_from_tray(self):
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.set_status(True, "online")
+
+    def _hide_to_tray(self):
+        self.hide()
+
+        if self.tray_icon is not None and not self._tray_notice_shown:
+            self.tray_icon.showMessage(
+                "SNDI",
+                "я в треї. клацни по іконці, щоб повернути вікно.",
+                QSystemTrayIcon.MessageIcon.Information,
+                2500,
+            )
+            self._tray_notice_shown = True
+
+    def _quit_from_tray(self):
+        self.force_quit = True
+        self._shutdown_runtime_threads()
+
+        if self.tray_icon is not None:
+            self.tray_icon.hide()
+
+        app = QApplication.instance()
+
+        if app is not None:
+            app.quit()
+
+    def _shutdown_runtime_threads(self):
+        """
+        Stop runtime background loops before real app exit.
+        """
+        try:
+            if self.voice_wake_thread is not None and self.voice_wake_thread.isRunning():
+                self.voice_wake_thread.request_stop()
+                self.voice_wake_thread.wait(1500)
+
+            self.voice_wake_thread = None
+
+            set_app_setting("voice_enabled", False)
+            self.app_settings = load_app_settings()
+            self._refresh_tray_voice_labels()
+
+        except Exception as error:
+            print("[SNDI][SHUTDOWN THREADS ERROR]", error)
+
+    def _refresh_tray_autostart_label(self):
+        if self.tray_autostart_action is None:
+            return
+
+        try:
+            if is_autostart_enabled():
+                self.tray_autostart_action.setText("Disable autostart")
+            else:
+                self.tray_autostart_action.setText("Enable autostart")
+
+        except Exception as error:
+            print("[SNDI][TRAY AUTOSTART STATUS ERROR]", error)
+            self.tray_autostart_action.setText("Autostart unavailable")
+        
+    def _refresh_tray_voice_labels(self):
+        voice_enabled = bool(self.app_settings.get("voice_enabled", False))
+
+        if self.tray_listen_once_action is not None:
+            self.tray_listen_once_action.setEnabled(not voice_enabled)
+
+        if self.tray_start_voice_action is not None:
+            self.tray_start_voice_action.setEnabled(not voice_enabled)
+
+        if self.tray_stop_voice_action is not None:
+            self.tray_stop_voice_action.setEnabled(voice_enabled)
+
+    def _toggle_autostart_from_tray(self):
+        try:
+            if is_autostart_enabled():
+                reply = disable_autostart()
+                set_app_setting("autostart_enabled", False)
+            else:
+                reply = enable_autostart()
+                set_app_setting("autostart_enabled", True)
+
+            self.app_settings = load_app_settings()
+            self._refresh_tray_autostart_label()
+
+            if self.tray_icon is not None:
+                self.tray_icon.showMessage(
+                    "SNDI",
+                    reply,
+                    QSystemTrayIcon.MessageIcon.Information,
+                    2500,
+                )
+
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": reply,
+                    "typing": False,
+                }
+            )
+            self.render_messages()
+
+        except Exception as error:
+            error_text = f"не змогла перемкнути автозапуск: {error}"
+            print("[SNDI][AUTOSTART TOGGLE ERROR]", error)
+
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": error_text,
+                    "typing": False,
+                }
+            )
+            self.render_messages()
+
+    # ---------- voice input ----------
+    def _start_voice_mode(self):
+        """
+        Stage 7: wake word loop.
+        SNDI listens for wake word, then listens for the next command.
+        """
+        if self.voice_wake_thread is not None and self.voice_wake_thread.isRunning():
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": "я вже слухаю wake word.",
+                    "typing": False,
+                }
+            )
+            self.render_messages()
+            return
+
+        wake_word = str(self.app_settings.get("voice_wake_word", "сенді") or "сенді")
+
+        wake_words = (
+            wake_word,
+            "сенді",
+            "сенді",
+            "сенди",
+            "sndi",
+            "sandy",
+        )
+
+        self.set_status(True, "listening")
+
+        set_app_setting("voice_enabled", True)
+        self.app_settings = load_app_settings()
+                # voice loop is runtime state; do not trust stale value after app restart
+        if self.app_settings.get("voice_enabled", False):
+            set_app_setting("voice_enabled", False)
+            self.app_settings = load_app_settings()
+            self._refresh_tray_voice_labels()
+
+        self.messages.append(
+            {
+                "speaker": "sndi",
+                "text": f"голосовий режим увімкнено. скажи «{wake_word}», потім команду.",
+                "typing": False,
+            }
+        )
+        self.render_messages()
+
+        self.voice_wake_thread = VoiceWakeLoopThread(
+            wake_words=wake_words,
+            language="uk-UA",
+        )
+        self.voice_wake_thread.status_changed.connect(self._on_voice_status_changed)
+        self.voice_wake_thread.wake_detected.connect(self._on_voice_wake_detected)
+        self.voice_wake_thread.command_recognized.connect(self._on_voice_command_recognized)
+        self.voice_wake_thread.error.connect(self._on_voice_error)
+        self.voice_wake_thread.finished.connect(self._on_voice_wake_finished)
+        self.voice_wake_thread.start()
+
+    def _stop_voice_mode(self):
+        """
+        Stop wake word loop.
+        """
+        set_app_setting("voice_enabled", False)
+        self.app_settings = load_app_settings()
+        self._refresh_tray_voice_labels()
+
+        if self.voice_wake_thread is not None and self.voice_wake_thread.isRunning():
+            self.voice_wake_thread.request_stop()
+            self.voice_wake_thread.wait(1500)
+
+        self.voice_wake_thread = None
+        self.set_status(True, "voice off")
+
+        self.messages.append(
+            {
+                "speaker": "sndi",
+                "text": "голосовий режим вимкнено.",
+                "typing": False,
+            }
+        )
+        self.render_messages()
+
+    def _toggle_voice_mode(self):
+        voice_enabled = bool(self.app_settings.get("voice_enabled", False))
+
+        if voice_enabled:
+            self._stop_voice_mode()
+        else:
+            self._start_voice_mode()
+
+    def _on_voice_wake_detected(self, wake_text: str):
+        wake_text = (wake_text or "").strip()
+
+        print("[SNDI][WAKE DETECTED]", wake_text)
+
+        self.set_status(True, "wake detected")
+
+        self.messages.append(
+            {
+                "speaker": "sndi",
+                "text": f"я тут. почула wake word: {wake_text}",
+                "typing": False,
+            }
+        )
+        self.render_messages()
+
+    def _on_voice_wake_finished(self):
+        self.set_status(True, "voice off")
+        set_app_setting("voice_enabled", False)
+        self.app_settings = load_app_settings()
+        self._refresh_tray_voice_labels()
+
+    def _start_manual_voice_command(self):
+        """
+        Stage 6: one-shot voice command.
+        Recognized text goes into the same ActionRouter pipeline.
+        """
+        if self.voice_once_thread is not None and self.voice_once_thread.isRunning():
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": "я вже слухаю команду.",
+                    "typing": False,
+                }
+            )
+            self.render_messages()
+            return
+
+        self.set_status(True, "listening")
+
+        self.messages.append(
+            {
+                "speaker": "sndi",
+                "text": "слухаю одну команду…",
+                "typing": False,
+            }
+        )
+        self.render_messages()
+
+        self.voice_once_thread = VoiceListenOnceThread(language="uk-UA")
+        self.voice_once_thread.status_changed.connect(self._on_voice_status_changed)
+        self.voice_once_thread.recognized.connect(self._on_voice_command_recognized)
+        self.voice_once_thread.error.connect(self._on_voice_error)
+        self.voice_once_thread.finished.connect(self._on_voice_once_finished)
+        self.voice_once_thread.start()
+
+    def _on_voice_status_changed(self, status: str):
+        status = (status or "online").strip()
+
+        if status == "listening":
+            self.set_status(True, "listening")
+        elif status == "recognizing":
+            self.set_status(True, "recognizing")
+        else:
+            self.set_status(True, "online")
+
+    def _on_voice_command_recognized(self, text: str):
+        text = (text or "").strip()
+
+        if not text:
+            self._on_voice_error("не розчула голосову команду.")
+            return
+
+        print("[SNDI][VOICE RECOGNIZED]", text)
+
+        self.messages.append(
+            {
+                "speaker": "sndi",
+                "text": f"почула: {text}",
+                "typing": False,
+            }
+        )
+        self.render_messages()
+
+        self.submit_user_text(text, source="voice")
+
+    def _on_voice_error(self, message: str):
+        message = (message or "voice input дав збій.").strip()
+        print("[SNDI][VOICE ERROR]", message)
+
+        self.set_status(True, "online")
+
+        self.messages.append(
+            {
+                "speaker": "sndi",
+                "text": message,
+                "typing": False,
+            }
+        )
+        self.render_messages()
+
+    def _on_voice_once_finished(self):
+        self.set_status(True, "online")
+
 
     # ---------- dialogs & logs for SystemManager ----------
     def confirm_dialog(self, prompt: str) -> bool:
@@ -926,17 +1361,36 @@ class ChatWindow(QWidget):
     # ---------- events ----------
     def send_message(self):
         user_text = self.input_field.text().strip()
+        self.submit_user_text(user_text, source="keyboard")
+
+    def submit_user_text(self, user_text: str, source: str = "keyboard"):
+        """
+        Unified user input pipeline for SNDI.
+
+        source:
+        - keyboard: text came from input field
+        - voice: text came from voice recognition
+        - system: text came from internal trigger/future tools
+        """
+        user_text = (user_text or "").strip()
 
         if not user_text:
             return
 
-        self.input_field.clear()
+        if source == "keyboard":
+            self.input_field.clear()
+
         self.sound_manager.play_send()
+
+        display_text = user_text
+
+        if source == "voice":
+            display_text = f"🎙 {user_text}"
 
         self.messages.append(
             {
                 "speaker": "user",
-                "text": user_text,
+                "text": display_text,
                 "typing": False,
             }
         )
@@ -959,6 +1413,145 @@ class ChatWindow(QWidget):
 
         if plan.action == "project_awareness":
             self._start_project_awareness(user_text)
+            return
+        
+        if plan.action == "voice_once":
+            self._start_manual_voice_command()
+            return
+        
+        if plan.action == "voice_start":
+            self._start_voice_mode()
+            return
+
+        if plan.action == "voice_stop":
+            self._stop_voice_mode()
+            return
+
+        if plan.action == "voice_toggle":
+            self._toggle_voice_mode()
+            return
+        
+        if plan.action == "tray_hide":
+            reply = "ховаюсь у трей."
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": reply,
+                    "typing": False,
+                }
+            )
+            self.render_messages()
+            self._hide_to_tray()
+            return
+
+        if plan.action == "tray_show":
+            self._show_from_tray()
+            reply = "я тут."
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": reply,
+                    "typing": False,
+                }
+            )
+            self.render_messages()
+            return
+        
+        if plan.action == "voice_reply_enable":
+            set_app_setting("voice_reply_enabled", True)
+            self.app_settings = load_app_settings()
+
+            reply = "озвучку відповідей увімкнено."
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": reply,
+                    "typing": False,
+                }
+            )
+            self.render_messages()
+            self._maybe_speak_reply(reply)
+            return
+
+        if plan.action == "voice_reply_disable":
+            set_app_setting("voice_reply_enabled", False)
+            self.app_settings = load_app_settings()
+
+            reply = "озвучку відповідей вимкнено."
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": reply,
+                    "typing": False,
+                }
+            )
+            self.render_messages()
+            return
+
+        if plan.action == "voice_reply_status":
+            enabled = bool(self.app_settings.get("voice_reply_enabled", False))
+            reply = "озвучка відповідей увімкнена." if enabled else "озвучка відповідей вимкнена."
+
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": reply,
+                    "typing": False,
+                }
+            )
+            self.render_messages()
+
+            if enabled:
+                self._maybe_speak_reply(reply)
+
+            return
+    
+        if plan.action == "autostart_enable":
+            reply = enable_autostart()
+            set_app_setting("autostart_enabled", True)
+            self.app_settings = load_app_settings()
+            self._refresh_tray_autostart_label()
+
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": reply,
+                    "typing": False,
+                }
+            )
+            self.render_messages()
+            return
+
+        if plan.action == "autostart_disable":
+            reply = disable_autostart()
+            set_app_setting("autostart_enabled", False)
+            self.app_settings = load_app_settings()
+            self._refresh_tray_autostart_label()
+
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": reply,
+                    "typing": False,
+                }
+            )
+            self.render_messages()
+            return
+
+        if plan.action == "autostart_status":
+            reply = get_autostart_status()
+            set_app_setting("autostart_enabled", is_autostart_enabled())
+            self.app_settings = load_app_settings()
+            self._refresh_tray_autostart_label()
+
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": reply,
+                    "typing": False,
+                }
+            )
+            self.render_messages()
             return
 
         if plan.action == "clipboard_explain":
@@ -1099,7 +1692,6 @@ class ChatWindow(QWidget):
 
         reply = execute_action(plan, user_text)
 
-
         if reply:
             self.messages.append(
                 {
@@ -1112,7 +1704,6 @@ class ChatWindow(QWidget):
             return
 
         self._start_normal_response(user_text)
-
 
     # ---------- screen scan ----------
     def _start_scan(self, user_text: str):
@@ -1203,6 +1794,8 @@ class ChatWindow(QWidget):
         if not reply or not reply.strip():
             reply = "глухий канал. нічого не бачу."
 
+        self._maybe_speak_reply(reply)
+
         if not self.messages or self.messages[-1]["speaker"] != "sndi":
             self.messages.append(
                 {
@@ -1222,6 +1815,8 @@ class ChatWindow(QWidget):
 
         if not reply or not reply.strip():
             reply = "шум глушить канал. повтори."
+
+        self._maybe_speak_reply(reply)
 
         if not self.messages or self.messages[-1]["speaker"] != "sndi":
             self.messages.append(
@@ -1331,6 +1926,8 @@ class ChatWindow(QWidget):
         if not reply or not reply.strip():
             reply = "системна дія не дала відповіді."
 
+        self._maybe_speak_reply(reply)
+
         try:
             append_history(user_text, reply)
         except Exception as error:
@@ -1398,6 +1995,8 @@ class ChatWindow(QWidget):
         if not reply or not reply.strip():
             reply = "web sensor мовчить. інтернет ніби є, але відповідь не зібралась."
 
+        self._maybe_speak_reply(reply)
+
         try:
             append_history(user_text, reply)
         except Exception as error:
@@ -1422,6 +2021,8 @@ class ChatWindow(QWidget):
 
         if not reply or not reply.strip():
             reply = "я бачу проєкт, але відповідь не зібралась. щось глухне на каналі."
+
+        self._maybe_speak_reply(reply)
 
         try:
             append_history(user_text, reply)
@@ -1462,6 +2063,26 @@ class ChatWindow(QWidget):
 
         self.messages[-1]["typing"] = False
         self.timer.stop()
+
+    def closeEvent(self, event):
+        """
+        If minimize_to_tray is enabled, closing the window hides it to tray.
+        Real exit is available from tray menu: Quit.
+        """
+        minimize_to_tray = self.app_settings.get("minimize_to_tray", True)
+
+        if (
+            not self.force_quit
+            and minimize_to_tray
+            and self.tray_icon is not None
+            and self.tray_icon.isVisible()
+        ):
+            event.ignore()
+            self._hide_to_tray()
+            return
+        
+        self._shutdown_runtime_threads()
+        event.accept()
 
     def start_voice_input(self):
         """
@@ -1528,6 +2149,40 @@ class ChatWindow(QWidget):
             )
             self.render_messages()
 
+    def _maybe_speak_reply(self, reply: str):
+        """
+        Speak SNDI reply only if voice_reply_enabled is true.
+        This is optional and must never break chat.
+        """
+        if not self.app_settings.get("voice_reply_enabled", False):
+            return
+
+        if not reply or not reply.strip():
+            return
+
+        if self.voice_reply_thread is not None and self.voice_reply_thread.isRunning():
+            print("[SNDI][TTS] skipped: previous voice reply still playing")
+            return
+
+        self.voice_reply_thread = VoiceReplyThread(reply)
+        self.voice_reply_thread.status_changed.connect(self._on_voice_status_changed)
+        self.voice_reply_thread.error.connect(self._on_voice_reply_error)
+        self.voice_reply_thread.start()
+
+    def _on_voice_reply_error(self, message: str):
+        message = (message or "озвучка дала збій.").strip()
+        print("[SNDI][TTS ERROR]", message)
+
+        self.set_status(True, "online")
+
+        self.messages.append(
+            {
+                "speaker": "sndi",
+                "text": message,
+                "typing": False,
+            }
+        )
+        self.render_messages()
 
 # ---------- app ----------
 def main():
