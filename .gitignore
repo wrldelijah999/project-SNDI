@@ -28,6 +28,9 @@ tempCodeRunnerFile.py
 
 # local memory
 memory/*.json
+memory/*.jsonl
+memory/safe_trash/
+memory/file_backups/
 !memory/.gitkeep
 
 # OS / IDE
