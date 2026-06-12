@@ -926,17 +926,36 @@ class ChatWindow(QWidget):
     # ---------- events ----------
     def send_message(self):
         user_text = self.input_field.text().strip()
+        self.submit_user_text(user_text, source="keyboard")
+
+    def submit_user_text(self, user_text: str, source: str = "keyboard"):
+        """
+        Unified user input pipeline for SNDI.
+
+        source:
+        - keyboard: text came from input field
+        - voice: text came from voice recognition
+        - system: text came from internal trigger/future tools
+        """
+        user_text = (user_text or "").strip()
 
         if not user_text:
             return
 
-        self.input_field.clear()
+        if source == "keyboard":
+            self.input_field.clear()
+
         self.sound_manager.play_send()
+
+        display_text = user_text
+
+        if source == "voice":
+            display_text = f"🎙 {user_text}"
 
         self.messages.append(
             {
                 "speaker": "user",
-                "text": user_text,
+                "text": display_text,
                 "typing": False,
             }
         )
@@ -1099,7 +1118,6 @@ class ChatWindow(QWidget):
 
         reply = execute_action(plan, user_text)
 
-
         if reply:
             self.messages.append(
                 {
@@ -1112,7 +1130,6 @@ class ChatWindow(QWidget):
             return
 
         self._start_normal_response(user_text)
-
 
     # ---------- screen scan ----------
     def _start_scan(self, user_text: str):
