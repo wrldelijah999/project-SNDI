@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+import difflib
 import os
 
 
@@ -106,6 +107,105 @@ def human_size(size_bytes: int | float | None) -> str:
         size /= 1024
 
     return f"{size_bytes} B"
+
+
+def _path_type(path: Path) -> str:
+    if path.is_dir():
+        return "folder"
+
+    if path.is_file():
+        return "file"
+
+    return "unknown"
+
+
+def _safe_stat(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {
+            "exists": False,
+            "type": "missing",
+            "size": None,
+            "size_human": "missing",
+        }
+
+    try:
+        stat = path.stat()
+        is_file = path.is_file()
+
+        return {
+            "exists": True,
+            "type": _path_type(path),
+            "size": stat.st_size if is_file else None,
+            "size_human": human_size(stat.st_size) if is_file else "(folder)",
+        }
+
+    except Exception as error:
+        return {
+            "exists": True,
+            "type": "unknown",
+            "size": None,
+            "size_human": "unknown",
+            "stat_error": str(error),
+        }
+
+
+def _preview_warning_for_path(path: Path) -> str | None:
+    if is_system_sensitive_path(path):
+        return "шлях схожий на системний або чутливий. дія потребує особливо уважного підтвердження."
+
+    return None
+
+
+def _build_preview_message(preview: FileOpPreview) -> str:
+    data = preview.preview or {}
+
+    lines = [
+        "preview файлової дії:",
+        f"- action: {preview.action}",
+        f"- target: {preview.target}",
+        f"- risk: {preview.risk_level}",
+    ]
+
+    source = data.get("source")
+    destination = data.get("destination")
+    new_name = data.get("new_name")
+
+    if source:
+        lines.append(f"- source: {source}")
+
+    if destination:
+        lines.append(f"- destination: {destination}")
+
+    if new_name:
+        lines.append(f"- new name: {new_name}")
+
+    lines.extend(
+        [
+            f"- type: {data.get('type', 'unknown')}",
+            f"- exists: {data.get('exists', 'unknown')}",
+            f"- size: {data.get('size_human', 'unknown')}",
+            f"- mode: {data.get('mode', 'mutation preview')}",
+        ]
+    )
+
+    if data.get("parent"):
+        lines.append(f"- parent: {data.get('parent')}")
+
+    if data.get("will_overwrite"):
+        lines.append("- warning: destination already exists / conflict")
+
+    if data.get("warning"):
+        lines.append(f"- warning: {data.get('warning')}")
+
+    if data.get("diff"):
+        lines.append("")
+        lines.append("diff preview:")
+        lines.append(data.get("diff"))
+
+    lines.append("")
+    lines.append("ця дія ще НЕ виконана. вона має пройти confirmation layer.")
+
+    return "\n".join(lines)
 
 
 def is_system_sensitive_path(path: str | Path) -> bool:
@@ -597,3 +697,375 @@ def build_readonly_preview(action: str, target: str | Path, data: dict[str, Any]
         preview=preview,
         message="read-only file operation preview",
     )
+
+
+def build_create_folder_preview(path: str | Path) -> FileOpPreview:
+    target = normalize_path(path)
+    parent = target.parent
+
+    preview = {
+        "type": "folder",
+        "exists": target.exists(),
+        "size": None,
+        "size_human": "(folder)",
+        "parent": str(parent),
+        "parent_exists": parent.exists(),
+        "mode": "create folder",
+        "will_overwrite": target.exists(),
+        "is_sensitive": is_system_sensitive_path(target),
+        "warning": _preview_warning_for_path(target),
+    }
+
+    risk = "medium"
+
+    if preview["is_sensitive"]:
+        risk = "high"
+
+    if target.exists():
+        risk = "high"
+        preview["warning"] = "ціль уже існує. створення папки може бути зайвим або конфліктним."
+
+    if not parent.exists():
+        risk = "medium"
+        preview["warning"] = "батьківська папка не існує. виконання має або створити її, або впасти залежно від executor logic."
+
+    result = FileOpPreview(
+        action="file_create_folder",
+        target=str(target),
+        risk_level=risk,
+        preview=preview,
+    )
+    result.message = _build_preview_message(result)
+    return result
+
+
+def build_create_text_file_preview(
+    path: str | Path,
+    content: str = "",
+    overwrite: bool = False,
+) -> FileOpPreview:
+    target = normalize_path(path)
+    parent = target.parent
+    exists = target.exists()
+
+    content_preview = content[:500]
+
+    if len(content) > 500:
+        content_preview += "…[truncated]"
+
+    preview = {
+        "type": "file",
+        "exists": exists,
+        "size": len(content.encode("utf-8")),
+        "size_human": human_size(len(content.encode("utf-8"))),
+        "parent": str(parent),
+        "parent_exists": parent.exists(),
+        "mode": "create text file",
+        "overwrite": overwrite,
+        "will_overwrite": exists and overwrite,
+        "content_preview": content_preview,
+        "is_sensitive": is_system_sensitive_path(target),
+        "warning": _preview_warning_for_path(target),
+    }
+
+    risk = "medium"
+
+    if preview["is_sensitive"]:
+        risk = "high"
+
+    if exists and not overwrite:
+        risk = "high"
+        preview["warning"] = "файл уже існує. без overwrite виконання має бути заблоковане."
+
+    if exists and overwrite:
+        risk = "high"
+        preview["warning"] = "файл уже існує і буде перезаписаний після підтвердження."
+
+    result = FileOpPreview(
+        action="file_create_file",
+        target=str(target),
+        risk_level=risk,
+        preview=preview,
+    )
+    result.message = _build_preview_message(result)
+    return result
+
+
+def build_copy_path_preview(source: str | Path, destination: str | Path) -> FileOpPreview:
+    source_path = normalize_path(source)
+    destination_path = normalize_path(destination)
+
+    source_stat = _safe_stat(source_path)
+    destination_stat = _safe_stat(destination_path)
+
+    preview = {
+        "type": source_stat.get("type", "unknown"),
+        "exists": source_path.exists(),
+        "source": str(source_path),
+        "destination": str(destination_path),
+        "destination_exists": destination_path.exists(),
+        "will_overwrite": destination_path.exists(),
+        "size": source_stat.get("size"),
+        "size_human": source_stat.get("size_human"),
+        "mode": "copy",
+        "is_sensitive": (
+            is_system_sensitive_path(source_path)
+            or is_system_sensitive_path(destination_path)
+        ),
+        "source_info": source_stat,
+        "destination_info": destination_stat,
+        "warning": None,
+    }
+
+    risk = "medium"
+
+    if not source_path.exists():
+        risk = "high"
+        preview["warning"] = "source не існує. виконання буде неможливим."
+
+    elif destination_path.exists():
+        risk = "high"
+        preview["warning"] = "destination уже існує. можливий conflict/overwrite."
+
+    elif preview["is_sensitive"]:
+        risk = "high"
+        preview["warning"] = _preview_warning_for_path(source_path) or _preview_warning_for_path(destination_path)
+
+    result = FileOpPreview(
+        action="file_copy",
+        target=str(destination_path),
+        risk_level=risk,
+        preview=preview,
+    )
+    result.message = _build_preview_message(result)
+    return result
+
+
+def build_move_path_preview(source: str | Path, destination: str | Path) -> FileOpPreview:
+    source_path = normalize_path(source)
+    destination_path = normalize_path(destination)
+
+    source_stat = _safe_stat(source_path)
+    destination_stat = _safe_stat(destination_path)
+
+    preview = {
+        "type": source_stat.get("type", "unknown"),
+        "exists": source_path.exists(),
+        "source": str(source_path),
+        "destination": str(destination_path),
+        "destination_exists": destination_path.exists(),
+        "will_overwrite": destination_path.exists(),
+        "size": source_stat.get("size"),
+        "size_human": source_stat.get("size_human"),
+        "mode": "move",
+        "is_sensitive": (
+            is_system_sensitive_path(source_path)
+            or is_system_sensitive_path(destination_path)
+        ),
+        "source_info": source_stat,
+        "destination_info": destination_stat,
+        "warning": None,
+    }
+
+    risk = "medium"
+
+    if not source_path.exists():
+        risk = "high"
+        preview["warning"] = "source не існує. виконання буде неможливим."
+
+    elif destination_path.exists():
+        risk = "high"
+        preview["warning"] = "destination уже існує. move може перезаписати або впасти."
+
+    elif preview["is_sensitive"]:
+        risk = "high"
+        preview["warning"] = _preview_warning_for_path(source_path) or _preview_warning_for_path(destination_path)
+
+    result = FileOpPreview(
+        action="file_move",
+        target=str(destination_path),
+        risk_level=risk,
+        preview=preview,
+    )
+    result.message = _build_preview_message(result)
+    return result
+
+
+def build_rename_path_preview(source: str | Path, new_name: str) -> FileOpPreview:
+    source_path = normalize_path(source)
+    clean_new_name = (new_name or "").strip().strip('"').strip("'")
+
+    if not clean_new_name:
+        destination_path = source_path
+    else:
+        destination_path = source_path.with_name(clean_new_name)
+
+    source_stat = _safe_stat(source_path)
+    destination_stat = _safe_stat(destination_path)
+
+    preview = {
+        "type": source_stat.get("type", "unknown"),
+        "exists": source_path.exists(),
+        "source": str(source_path),
+        "destination": str(destination_path),
+        "new_name": clean_new_name,
+        "destination_exists": destination_path.exists(),
+        "will_overwrite": destination_path.exists(),
+        "size": source_stat.get("size"),
+        "size_human": source_stat.get("size_human"),
+        "mode": "rename",
+        "is_sensitive": (
+            is_system_sensitive_path(source_path)
+            or is_system_sensitive_path(destination_path)
+        ),
+        "source_info": source_stat,
+        "destination_info": destination_stat,
+        "warning": None,
+    }
+
+    risk = "medium"
+
+    if not source_path.exists():
+        risk = "high"
+        preview["warning"] = "source не існує. rename неможливий."
+
+    elif not clean_new_name:
+        risk = "high"
+        preview["warning"] = "нова назва порожня."
+
+    elif destination_path.exists():
+        risk = "high"
+        preview["warning"] = "файл або папка з новою назвою вже існує."
+
+    elif preview["is_sensitive"]:
+        risk = "high"
+        preview["warning"] = _preview_warning_for_path(source_path) or _preview_warning_for_path(destination_path)
+
+    result = FileOpPreview(
+        action="file_rename",
+        target=str(source_path),
+        risk_level=risk,
+        preview=preview,
+    )
+    result.message = _build_preview_message(result)
+    return result
+
+
+def build_delete_path_preview(path: str | Path) -> FileOpPreview:
+    target = normalize_path(path)
+    target_stat = _safe_stat(target)
+
+    preview = {
+        "type": target_stat.get("type", "unknown"),
+        "exists": target.exists(),
+        "size": target_stat.get("size"),
+        "size_human": target_stat.get("size_human"),
+        "mode": "safe delete only",
+        "delete_policy": "send2trash if available, otherwise AppData safe_trash fallback",
+        "is_sensitive": is_system_sensitive_path(target),
+        "warning": None,
+    }
+
+    risk = "destructive"
+
+    if not target.exists():
+        preview["warning"] = "шлях не існує. delete буде неможливий."
+
+    elif preview["is_sensitive"]:
+        preview["warning"] = _preview_warning_for_path(target)
+
+    result = FileOpPreview(
+        action="file_delete_safe",
+        target=str(target),
+        risk_level=risk,
+        preview=preview,
+    )
+    result.message = _build_preview_message(result)
+    return result
+
+
+def build_text_replace_preview(
+    path: str | Path,
+    old_text: str,
+    new_text: str,
+    max_diff_lines: int = 120,
+) -> FileOpPreview:
+    target = normalize_path(path)
+    target_stat = _safe_stat(target)
+
+    preview: dict[str, Any] = {
+        "type": target_stat.get("type", "unknown"),
+        "exists": target.exists(),
+        "size": target_stat.get("size"),
+        "size_human": target_stat.get("size_human"),
+        "mode": "text replace preview",
+        "old_text_preview": (old_text or "")[:300],
+        "new_text_preview": (new_text or "")[:300],
+        "is_sensitive": is_system_sensitive_path(target),
+        "warning": None,
+    }
+
+    risk = "medium"
+
+    if not target.exists():
+        risk = "high"
+        preview["warning"] = "файл не існує. edit неможливий."
+
+    elif not target.is_file():
+        risk = "high"
+        preview["warning"] = "це не файл. edit неможливий."
+
+    elif is_probably_binary(target):
+        risk = "high"
+        preview["warning"] = "схоже, це binary-файл. text edit заблокований."
+
+    elif not old_text:
+        risk = "high"
+        preview["warning"] = "old_text порожній. replace заблокований."
+
+    else:
+        try:
+            original = target.read_text(encoding="utf-8", errors="replace")
+
+            if old_text not in original:
+                risk = "high"
+                preview["warning"] = "old_text не знайдено у файлі. replace нічого не змінить."
+
+            modified = original.replace(old_text, new_text, 1)
+
+            diff_lines = list(
+                difflib.unified_diff(
+                    original.splitlines(),
+                    modified.splitlines(),
+                    fromfile=str(target),
+                    tofile=f"{target} (after)",
+                    lineterm="",
+                )
+            )
+
+            truncated = len(diff_lines) > max_diff_lines
+            limited_diff = diff_lines[:max_diff_lines]
+
+            if truncated:
+                limited_diff.append("...[diff truncated]")
+
+            preview["diff"] = "\n".join(limited_diff) if limited_diff else "(no diff)"
+            preview["diff_truncated"] = truncated
+            preview["replace_count_preview"] = 1
+
+        except Exception as error:
+            risk = "high"
+            preview["warning"] = f"не змогла побудувати diff: {error}"
+
+    if preview["is_sensitive"] and risk != "high":
+        risk = "high"
+        preview["warning"] = _preview_warning_for_path(target)
+
+    result = FileOpPreview(
+        action="file_edit_preview",
+        target=str(target),
+        risk_level=risk,
+        preview=preview,
+    )
+    result.message = _build_preview_message(result)
+    return result
