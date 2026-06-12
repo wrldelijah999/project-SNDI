@@ -42,6 +42,7 @@ from sndi.core.memory import append_history
 from sndi.core.intents import is_screen_scan_intent, is_project_awareness_intent
 from sndi.tools.system_control import run_system_control_from_text
 from sndi.tools.project_context import build_project_snapshot
+from sndi.core.action_router import decide_action, execute_action
 from sndi.services.openai_service import (
     analyze_image,
     analyze_project_snapshot,
@@ -927,7 +928,8 @@ class ChatWindow(QWidget):
 
         if not user_text:
             return
-
+        
+        self.input_field.clear()
         self.sound_manager.play_send()
 
         self.messages.append(
@@ -938,14 +940,39 @@ class ChatWindow(QWidget):
             }
         )
 
-        if is_screen_scan_intent(user_text):
+        plan = decide_action(user_text)
+        print("[SNDI][ACTION ROUTER]", plan)
+
+        if plan.action == "screen_scan":
             self._start_scan(user_text)
-            self.input_field.clear()
             return
 
-        self._start_system_or_web_or_normal(user_text)
-        self.input_field.clear()
-        return
+        if plan.action == "system_action":
+            self._start_system_or_web_or_normal(user_text)
+            return
+
+        if plan.action == "web_search":
+            self._start_web_or_normal(user_text)
+            return
+
+        if plan.action == "project_awareness":
+            self._start_project_awareness(user_text)
+            return
+
+        reply = execute_action(plan, user_text)
+
+        if reply:
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": reply,
+                    "typing": False,
+                }
+            )
+            self.render_messages()
+            return
+
+        self._start_normal_response(user_text)
 
     # ---------- screen scan ----------
        # ---------- screen scan ----------
