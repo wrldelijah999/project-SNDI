@@ -458,6 +458,7 @@ class ChatWindow(QWidget):
         self.tray_menu: QMenu | None = None
         self.tray_status_action: QAction | None = None
         self.tray_start_voice_action: QAction | None = None
+        self.tray_listen_once_action: QAction | None = None
         self.tray_stop_voice_action: QAction | None = None
         self.tray_autostart_action: QAction | None = None
 
@@ -730,10 +731,13 @@ class ChatWindow(QWidget):
             hide_action = QAction("Hide to tray", self)
             hide_action.triggered.connect(self._hide_to_tray)
 
-            self.tray_start_voice_action = QAction("Start listening", self)
+            self.tray_listen_once_action = QAction("Listen once", self)
+            self.tray_listen_once_action.triggered.connect(self._start_manual_voice_command)
+
+            self.tray_start_voice_action = QAction("Start wake listening", self)
             self.tray_start_voice_action.triggered.connect(self._start_voice_mode)
 
-            self.tray_stop_voice_action = QAction("Stop listening", self)
+            self.tray_stop_voice_action = QAction("Stop wake listening", self)
             self.tray_stop_voice_action.triggered.connect(self._stop_voice_mode)
 
             self.tray_autostart_action = QAction("Toggle autostart", self)
@@ -748,6 +752,7 @@ class ChatWindow(QWidget):
             self.tray_menu.addAction(show_action)
             self.tray_menu.addAction(hide_action)
             self.tray_menu.addSeparator()
+            self.tray_menu.addAction(self.tray_listen_once_action)
             self.tray_menu.addAction(self.tray_start_voice_action)
             self.tray_menu.addAction(self.tray_stop_voice_action)
             self.tray_menu.addSeparator()
@@ -800,6 +805,7 @@ class ChatWindow(QWidget):
 
     def _quit_from_tray(self):
         self.force_quit = True
+        self._shutdown_runtime_threads()
 
         if self.tray_icon is not None:
             self.tray_icon.hide()
@@ -808,6 +814,24 @@ class ChatWindow(QWidget):
 
         if app is not None:
             app.quit()
+
+    def _shutdown_runtime_threads(self):
+        """
+        Stop runtime background loops before real app exit.
+        """
+        try:
+            if self.voice_wake_thread is not None and self.voice_wake_thread.isRunning():
+                self.voice_wake_thread.request_stop()
+                self.voice_wake_thread.wait(1500)
+
+            self.voice_wake_thread = None
+
+            set_app_setting("voice_enabled", False)
+            self.app_settings = load_app_settings()
+            self._refresh_tray_voice_labels()
+
+        except Exception as error:
+            print("[SNDI][SHUTDOWN THREADS ERROR]", error)
 
     def _refresh_tray_autostart_label(self):
         if self.tray_autostart_action is None:
@@ -825,6 +849,9 @@ class ChatWindow(QWidget):
         
     def _refresh_tray_voice_labels(self):
         voice_enabled = bool(self.app_settings.get("voice_enabled", False))
+
+        if self.tray_listen_once_action is not None:
+            self.tray_listen_once_action.setEnabled(not voice_enabled)
 
         if self.tray_start_voice_action is not None:
             self.tray_start_voice_action.setEnabled(not voice_enabled)
@@ -906,7 +933,11 @@ class ChatWindow(QWidget):
 
         set_app_setting("voice_enabled", True)
         self.app_settings = load_app_settings()
-        self._refresh_tray_voice_labels()
+                # voice loop is runtime state; do not trust stale value after app restart
+        if self.app_settings.get("voice_enabled", False):
+            set_app_setting("voice_enabled", False)
+            self.app_settings = load_app_settings()
+            self._refresh_tray_voice_labels()
 
         self.messages.append(
             {
@@ -1398,6 +1429,32 @@ class ChatWindow(QWidget):
 
         if plan.action == "voice_toggle":
             self._toggle_voice_mode()
+            return
+        
+        if plan.action == "tray_hide":
+            reply = "ховаюсь у трей."
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": reply,
+                    "typing": False,
+                }
+            )
+            self.render_messages()
+            self._hide_to_tray()
+            return
+
+        if plan.action == "tray_show":
+            self._show_from_tray()
+            reply = "я тут."
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": reply,
+                    "typing": False,
+                }
+            )
+            self.render_messages()
             return
         
         if plan.action == "voice_reply_enable":
@@ -2023,7 +2080,8 @@ class ChatWindow(QWidget):
             event.ignore()
             self._hide_to_tray()
             return
-
+        
+        self._shutdown_runtime_threads()
         event.accept()
 
     def start_voice_input(self):

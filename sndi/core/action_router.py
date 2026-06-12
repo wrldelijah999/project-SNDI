@@ -476,6 +476,44 @@ def decide_action(user_text: str) -> ActionPlan:
             requires_confirmation=False,
             reason="message looks like a local system action",
         )
+    
+    if any(
+        phrase in text
+        for phrase in (
+            "сховайся в трей",
+            "сховай в трей",
+            "згорнись в трей",
+            "hide to tray",
+            "minimize to tray",
+        )
+    ):
+        return ActionPlan(
+            action="tray_hide",
+            target="system_tray",
+            query=user_text,
+            confidence=0.95,
+            requires_confirmation=False,
+            reason="user wants to hide SNDI to tray",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
+            "відкрийся з трея",
+            "покажи вікно",
+            "поверни вікно",
+            "show window",
+            "show sndi",
+        )
+    ):
+        return ActionPlan(
+            action="tray_show",
+            target="system_tray",
+            query=user_text,
+            confidence=0.95,
+            requires_confirmation=False,
+            reason="user wants to show SNDI window from tray",
+        )
 
     if is_project_awareness_intent(user_text):
         return ActionPlan(
