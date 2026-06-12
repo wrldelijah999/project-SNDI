@@ -49,6 +49,7 @@ from sndi.tools.project_context import build_project_snapshot
 from sndi.core.action_router import decide_action, execute_action
 from sndi.core.app_settings import load_app_settings, save_app_settings, set_app_setting
 from sndi.tools.clipboard_tools import get_clipboard_text
+from sndi.services.voice_service import VoiceListenOnceThread
 from sndi.tools.autostart import (
     enable_autostart,
     disable_autostart,
@@ -440,6 +441,7 @@ class ChatWindow(QWidget):
         self.project_thread: ProjectThread | None = None
         self.web_thread: WebThread | None = None
         self.system_action_thread: SystemActionThread | None = None
+        self.voice_once_thread: VoiceListenOnceThread | None = None
         self.streaming_text: str | None = None
         self.streaming_index = 0
         self.dot_phase = 0
@@ -725,10 +727,10 @@ class ChatWindow(QWidget):
             hide_action = QAction("Hide to tray", self)
             hide_action.triggered.connect(self._hide_to_tray)
 
-            self.tray_start_voice_action = QAction("Start listening (soon)", self)
-            self.tray_start_voice_action.setEnabled(False)
+            self.tray_start_voice_action = QAction("Listen once", self)
+            self.tray_start_voice_action.triggered.connect(self._start_manual_voice_command)
 
-            self.tray_stop_voice_action = QAction("Stop listening (soon)", self)
+            self.tray_stop_voice_action = QAction("Stop listening (wake loop soon)", self)
             self.tray_stop_voice_action.setEnabled(False)
 
             self.tray_autostart_action = QAction("Toggle autostart", self)
@@ -858,6 +860,90 @@ class ChatWindow(QWidget):
                 }
             )
             self.render_messages()
+
+    # ---------- voice input ----------
+    def _start_manual_voice_command(self):
+        """
+        Stage 6: one-shot voice command.
+        Recognized text goes into the same ActionRouter pipeline.
+        """
+        if self.voice_once_thread is not None and self.voice_once_thread.isRunning():
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": "я вже слухаю команду.",
+                    "typing": False,
+                }
+            )
+            self.render_messages()
+            return
+
+        self.set_status(True, "listening")
+
+        self.messages.append(
+            {
+                "speaker": "sndi",
+                "text": "слухаю одну команду…",
+                "typing": False,
+            }
+        )
+        self.render_messages()
+
+        self.voice_once_thread = VoiceListenOnceThread(language="uk-UA")
+        self.voice_once_thread.status_changed.connect(self._on_voice_status_changed)
+        self.voice_once_thread.recognized.connect(self._on_voice_command_recognized)
+        self.voice_once_thread.error.connect(self._on_voice_error)
+        self.voice_once_thread.finished.connect(self._on_voice_once_finished)
+        self.voice_once_thread.start()
+
+    def _on_voice_status_changed(self, status: str):
+        status = (status or "online").strip()
+
+        if status == "listening":
+            self.set_status(True, "listening")
+        elif status == "recognizing":
+            self.set_status(True, "recognizing")
+        else:
+            self.set_status(True, "online")
+
+    def _on_voice_command_recognized(self, text: str):
+        text = (text or "").strip()
+
+        if not text:
+            self._on_voice_error("не розчула голосову команду.")
+            return
+
+        print("[SNDI][VOICE RECOGNIZED]", text)
+
+        self.messages.append(
+            {
+                "speaker": "sndi",
+                "text": f"почула: {text}",
+                "typing": False,
+            }
+        )
+        self.render_messages()
+
+        self.submit_user_text(text, source="voice")
+
+    def _on_voice_error(self, message: str):
+        message = (message or "voice input дав збій.").strip()
+        print("[SNDI][VOICE ERROR]", message)
+
+        self.set_status(True, "online")
+
+        self.messages.append(
+            {
+                "speaker": "sndi",
+                "text": message,
+                "typing": False,
+            }
+        )
+        self.render_messages()
+
+    def _on_voice_once_finished(self):
+        self.set_status(True, "online")
+
 
     # ---------- dialogs & logs for SystemManager ----------
     def confirm_dialog(self, prompt: str) -> bool:
@@ -1176,6 +1262,10 @@ class ChatWindow(QWidget):
 
         if plan.action == "project_awareness":
             self._start_project_awareness(user_text)
+            return
+        
+        if plan.action == "voice_once":
+            self._start_manual_voice_command()
             return
         
         if plan.action == "autostart_enable":

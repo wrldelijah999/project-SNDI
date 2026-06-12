@@ -336,6 +336,25 @@ def decide_action(user_text: str) -> ActionPlan:
             requires_confirmation=False,
             reason="user asks for Windows autostart status",
         )
+    
+    if any(
+        phrase in text
+        for phrase in (
+            "слухай команду",
+            "прослухай команду",
+            "голосова команда",
+            "listen once",
+            "voice command",
+        )
+    ):
+        return ActionPlan(
+            action="voice_once",
+            target="microphone",
+            query=user_text,
+            confidence=0.95,
+            requires_confirmation=False,
+            reason="user wants one-shot voice command input",
+        )
 
     if looks_like_system_request(user_text):
         return ActionPlan(
