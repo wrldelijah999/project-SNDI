@@ -324,7 +324,22 @@ def execute_action(plan: ActionPlan, user_text: str) -> str | None:
     """
     Execute only safe synchronous actions.
 
-    For Stage 1 this is intentionally empty.
-    Later stages will add decision log, git summary, PC health, daily brief.
+    GUI still handles async actions:
+    - chat
+    - system_action
+    - web_search
+    - screen_scan
+    - project_awareness
     """
+
+    if plan.action == "record_decision":
+        from sndi.core.decision_log import record_decision
+
+        return record_decision(plan.query or user_text)
+
+    if plan.action == "recall_decisions":
+        from sndi.core.decision_log import recall_decisions
+
+        return recall_decisions(plan.query or user_text)
+
     return None
