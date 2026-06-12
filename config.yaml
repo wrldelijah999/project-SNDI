@@ -1,7 +1,7 @@
 name: SNDI
 model: gpt-4.1-mini
 vision_model: gpt-4.1-mini
-web_model: gpt-4.1-minii
+web_model: gpt-4.1-mini
 temperature: 0.75
 max_tokens: 900
 

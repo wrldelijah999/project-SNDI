@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
-    QTextEdit,
+    QTextBrowser,
     QLineEdit,
     QPushButton,
     QLabel,
@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
 )
 
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QUrl
 from PyQt6.QtGui import (
     QFont,
     QFontDatabase,
@@ -31,25 +31,26 @@ from PyQt6.QtGui import (
     QLinearGradient,
     QBrush,
     QTextCursor,
+    QDesktopServices,
 )
 
 from sndi.core.conversation_core import ask
 from sndi.storage import resource_path
 from sndi.system_manager import SystemManager
-from sndi.core.intents import is_screen_scan_intent
 from sndi.tools.screen_capture import capture_screen, cleanup_screenshot
-from sndi.services.openai_service import analyze_image
 from sndi.core.memory import append_history
 from sndi.core.intents import is_screen_scan_intent, is_project_awareness_intent
-from sndi.tools.screen_capture import capture_screen, cleanup_screenshot
 from sndi.tools.system_control import run_system_control_from_text
 from sndi.tools.project_context import build_project_snapshot
+from sndi.core.action_router import decide_action, execute_action
+from sndi.tools.clipboard_tools import get_clipboard_text
 from sndi.services.openai_service import (
     analyze_image,
     analyze_project_snapshot,
     decide_if_web_needed,
     call_web_search,
     decide_system_action,
+    looks_like_system_request
 )
 
 try:
@@ -291,7 +292,18 @@ class SystemActionThread(QThread):
 
     def run(self):
         try:
-            action = decide_system_action(self.user_text)
+            if looks_like_system_request(self.user_text):
+                action = decide_system_action(self.user_text)
+            else:
+                action = {
+                    "is_system_action": False,
+                    "intent": "unknown",
+                    "target": "",
+                    "url": "",
+                    "query": "",
+                    "confidence": 0.0,
+                    "reason": "skipped system AI check: message does not look like a system request",
+                }
 
             if not action.get("is_system_action", False):
                 self.finished.emit("__NO_SYSTEM_ACTION__")
@@ -461,11 +473,17 @@ class ChatWindow(QWidget):
             )
         )
 
-        self.chat_area = QTextEdit(readOnly=True)
+        self.chat_area = QTextBrowser()
+        self.chat_area.setReadOnly(True)
         self.chat_area.setFont(self.base_font)
+        self.chat_area.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextBrowserInteraction
+        )
+        self.chat_area.setOpenExternalLinks(True)
+
         self.chat_area.setStyleSheet(
             f"""
-            QTextEdit {{
+            QTextBrowser {{
                 background-color: {self.chat_bg};
                 color: {self.cyan_text};
                 padding: 16px;
@@ -674,13 +692,46 @@ class ChatWindow(QWidget):
             .replace('"', "&quot;")
             .replace("'", "&#39;")
         )
+    
+    def linkify_text(self, text: str) -> str:
+        """
+        Escape plain text and convert URLs into clickable links.
+        Supports:
+        - https://example.com
+        - http://example.com
+        - www.example.com
+        """
+        escaped = self.escape_html(text)
+
+        url_pattern = r"((?:https?://|www\.)[^\s<]+)"
+
+        def repl(match):
+            visible_url = match.group(1)
+
+            trailing = ""
+            while visible_url and visible_url[-1] in ".,!?;:)":
+                trailing = visible_url[-1] + trailing
+                visible_url = visible_url[:-1]
+
+            href = visible_url
+
+            if href.startswith("www."):
+                href = "https://" + href
+
+            return (
+                f'<a href="{href}" '
+                f'style="color:#00f0ff; text-decoration:underline;">'
+                f"{visible_url}</a>{trailing}"
+            )
+
+        return re.sub(url_pattern, repl, escaped)
 
     def render_markdown(self, text: str) -> str:
         """
-        Lightweight markdown/code renderer for QTextEdit HTML.
+        Lightweight markdown/code renderer for QTextBrowser HTML.
 
         Supports:
-        - plain multiline text
+        - plain multiline text with clickable URLs
         - fenced code blocks ```python ... ```
         - simple syntax highlighting for Python and JSON
         """
@@ -689,7 +740,6 @@ class ChatWindow(QWidget):
             escaped = self.escape_html(code)
             lang = (lang or "").lower().strip()
 
-            # comments
             escaped = re.sub(
                 r"(#.*?$)",
                 r'<font color="#b3a1ff">\1</font>',
@@ -697,7 +747,6 @@ class ChatWindow(QWidget):
                 flags=re.MULTILINE,
             )
 
-            # strings
             escaped = re.sub(
                 r"(&quot;.*?&quot;|&#39;.*?&#39;)",
                 r'<font color="#5ffbf1">\1</font>',
@@ -775,16 +824,16 @@ class ChatWindow(QWidget):
 
         parts = []
         position = 0
-
         pattern = re.compile(r"```(\w+)?\n(.*?)```", re.DOTALL)
 
         for match in pattern.finditer(text):
-            normal_text = text[position : match.start()]
+            normal_text = text[position:match.start()]
 
             if normal_text:
+                safe_text = self.linkify_text(normal_text)
                 parts.append(
                     '<span style="white-space: pre-wrap;">'
-                    f"{self.escape_html(normal_text)}"
+                    f"{safe_text}"
                     "</span>"
                 )
 
@@ -797,9 +846,10 @@ class ChatWindow(QWidget):
         tail = text[position:]
 
         if tail:
+            safe_tail = self.linkify_text(tail)
             parts.append(
                 '<span style="white-space: pre-wrap;">'
-                f"{self.escape_html(tail)}"
+                f"{safe_tail}"
                 "</span>"
             )
 
@@ -880,6 +930,7 @@ class ChatWindow(QWidget):
         if not user_text:
             return
 
+        self.input_field.clear()
         self.sound_manager.play_send()
 
         self.messages.append(
@@ -889,18 +940,180 @@ class ChatWindow(QWidget):
                 "typing": False,
             }
         )
+        self.render_messages()
 
-        if is_screen_scan_intent(user_text):
+        plan = decide_action(user_text)
+        print("[SNDI][ACTION ROUTER]", plan)
+
+        if plan.action == "screen_scan":
             self._start_scan(user_text)
-            self.input_field.clear()
             return
 
-        self._start_system_or_web_or_normal(user_text)
-        self.input_field.clear()
-        return
+        if plan.action == "system_action":
+            self._start_system_or_web_or_normal(user_text)
+            return
 
-    # ---------- screen scan ----------
-       # ---------- screen scan ----------
+        if plan.action == "web_search":
+            self._start_web_or_normal(user_text)
+            return
+
+        if plan.action == "project_awareness":
+            self._start_project_awareness(user_text)
+            return
+
+        if plan.action == "clipboard_explain":
+            clipboard_text = get_clipboard_text()
+
+            if not clipboard_text:
+                self.messages.append(
+                    {
+                        "speaker": "sndi",
+                        "text": "буфер обміну порожній або там немає тексту.",
+                        "typing": False,
+                    }
+                )
+                self.render_messages()
+                return
+
+            enriched_prompt = (
+                "Режим: clipboard_explain\n"
+                "Користувач просить пояснити текст із буфера обміну.\n\n"
+                f"Запит користувача:\n{user_text}\n\n"
+                f"Буфер обміну:\n{clipboard_text}\n\n"
+                "Відповідай українською, коротко і практично. "
+                "Поясни суть, важливі деталі і що з цим робити далі."
+            )
+
+            self._start_normal_response(enriched_prompt)
+            return
+
+        if plan.action == "error_explain":
+            clipboard_text = get_clipboard_text()
+
+            error_markers = (
+                "traceback",
+                "error",
+                "exception",
+                "nameerror",
+                "typeerror",
+                "attributeerror",
+                "importerror",
+                "modulenotfounderror",
+                "syntaxerror",
+                "badrequesterror",
+                "filenotfounderror",
+            )
+
+            user_has_error_text = any(
+                marker in user_text.lower()
+                for marker in error_markers
+            )
+
+            source_text = user_text if user_has_error_text else clipboard_text
+
+            if not source_text.strip():
+                self.messages.append(
+                    {
+                        "speaker": "sndi",
+                        "text": "не бачу тексту помилки. скопіюй traceback або встав його в повідомлення.",
+                        "typing": False,
+                    }
+                )
+                self.render_messages()
+                return
+
+            enriched_prompt = (
+                "Режим: error_explain\n"
+                "Користувач просить пояснити технічну помилку.\n\n"
+                f"Запит користувача:\n{user_text}\n\n"
+                f"Текст помилки або traceback:\n{source_text}\n\n"
+                "Відповідай українською. "
+                "Поясни коротко:\n"
+                "1. що це за помилка;\n"
+                "2. найімовірніша причина;\n"
+                "3. де саме шукати проблему;\n"
+                "4. що зробити для фіксу.\n"
+                "Не роздувай відповідь. Дай практичні кроки."
+            )
+
+            self._start_normal_response(enriched_prompt)
+            return
+
+        if plan.action == "code_review":
+            clipboard_text = get_clipboard_text()
+
+            code_markers = (
+                "def ",
+                "class ",
+                "import ",
+                "from ",
+                "return ",
+                "if ",
+                "for ",
+                "while ",
+                "try:",
+                "except",
+                "{",
+                "}",
+                "function ",
+                "const ",
+                "let ",
+                "var ",
+            )
+
+            user_has_code = any(
+                marker in user_text
+                for marker in code_markers
+            )
+
+            source_code = user_text if user_has_code else clipboard_text
+
+            if not source_code.strip():
+                self.messages.append(
+                    {
+                        "speaker": "sndi",
+                        "text": "не бачу коду. скопіюй код у буфер або встав його в повідомлення.",
+                        "typing": False,
+                    }
+                )
+                self.render_messages()
+                return
+
+            enriched_prompt = (
+                "Режим: code_review\n"
+                "Користувач просить перевірити код.\n\n"
+                f"Запит користувача:\n{user_text}\n\n"
+                f"Код для ревʼю:\n{source_code}\n\n"
+                "Відповідай українською. "
+                "Зроби практичне ревʼю коду:\n"
+                "1. коротко що робить код;\n"
+                "2. потенційні баги;\n"
+                "3. слабкі місця або ризики;\n"
+                "4. що покращити;\n"
+                "5. якщо є явний фікс — покажи маленький фрагмент, не переписуй усе без потреби.\n"
+                "Не роздувай відповідь. Дай конкретику."
+            )
+
+            self._start_normal_response(enriched_prompt)
+            return
+
+        reply = execute_action(plan, user_text)
+
+
+        if reply:
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": reply,
+                    "typing": False,
+                }
+            )
+            self.render_messages()
+            return
+
+        self._start_normal_response(user_text)
+
+
     # ---------- screen scan ----------
     def _start_scan(self, user_text: str):
         """
@@ -981,25 +1194,7 @@ class ChatWindow(QWidget):
         self.scan_thread.finished.connect(self._receive_scan_reply)
         self.scan_thread.start()
 
-    def _receive_scan_reply(self, reply: str):
-        self.sound_manager.play_message()
-        self.set_status(True, "online")
 
-        if not reply or not reply.strip():
-            reply = "глухий канал. нічого не бачу."
-
-        if not self.messages or self.messages[-1]["speaker"] != "sndi":
-            self.messages.append(
-                {
-                    "speaker": "sndi",
-                    "text": "",
-                    "typing": True,
-                }
-            )
-
-        self.streaming_text = reply
-        self.streaming_index = 0
-        self.timer.start(12)
 
     def _receive_scan_reply(self, reply: str):
         self.sound_manager.play_message()
