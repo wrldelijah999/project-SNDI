@@ -43,6 +43,7 @@ from sndi.core.intents import is_screen_scan_intent, is_project_awareness_intent
 from sndi.tools.system_control import run_system_control_from_text
 from sndi.tools.project_context import build_project_snapshot
 from sndi.core.action_router import decide_action, execute_action
+from sndi.tools.clipboard_tools import get_clipboard_text
 from sndi.services.openai_service import (
     analyze_image,
     analyze_project_snapshot,
@@ -957,9 +958,37 @@ class ChatWindow(QWidget):
 
         if plan.action == "project_awareness":
             self._start_project_awareness(user_text)
+            
+            return
+        
+        if plan.action == "clipboard_explain":
+            clipboard_text = get_clipboard_text()
+
+            if not clipboard_text:
+                self.messages.append(
+                    {
+                        "speaker": "sndi",
+                        "text": "буфер обміну порожній або там немає тексту.",
+                        "typing": False,
+                    }
+                )
+                self.render_messages()
+                return
+
+            enriched_prompt = (
+                "Режим: clipboard_explain\n"
+                "Користувач просить пояснити текст із буфера обміну.\n\n"
+                f"Запит користувача:\n{user_text}\n\n"
+                f"Буфер обміну:\n{clipboard_text}\n\n"
+                "Відповідай українською, коротко і практично. "
+                "Поясни суть, важливі деталі і що з цим робити далі."
+            )
+
+            self._start_normal_response(enriched_prompt)
             return
 
         reply = execute_action(plan, user_text)
+
 
         if reply:
             self.messages.append(
