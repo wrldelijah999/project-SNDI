@@ -49,6 +49,7 @@ from sndi.tools.project_context import build_project_snapshot
 from sndi.core.action_router import decide_action, execute_action
 from sndi.core.app_settings import load_app_settings, save_app_settings, set_app_setting
 from sndi.tools.clipboard_tools import get_clipboard_text
+from sndi.services.voice_reply_service import VoiceReplyThread
 from sndi.services.voice_service import VoiceListenOnceThread, VoiceWakeLoopThread
 from sndi.tools.autostart import (
     enable_autostart,
@@ -443,6 +444,7 @@ class ChatWindow(QWidget):
         self.system_action_thread: SystemActionThread | None = None
         self.voice_once_thread: VoiceListenOnceThread | None = None
         self.voice_wake_thread: VoiceWakeLoopThread | None = None
+        self.voice_reply_thread: VoiceReplyThread | None = None
         self.streaming_text: str | None = None
         self.streaming_index = 0
         self.dot_phase = 0
@@ -1397,6 +1399,55 @@ class ChatWindow(QWidget):
         if plan.action == "voice_toggle":
             self._toggle_voice_mode()
             return
+        
+        if plan.action == "voice_reply_enable":
+            set_app_setting("voice_reply_enabled", True)
+            self.app_settings = load_app_settings()
+
+            reply = "озвучку відповідей увімкнено."
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": reply,
+                    "typing": False,
+                }
+            )
+            self.render_messages()
+            self._maybe_speak_reply(reply)
+            return
+
+        if plan.action == "voice_reply_disable":
+            set_app_setting("voice_reply_enabled", False)
+            self.app_settings = load_app_settings()
+
+            reply = "озвучку відповідей вимкнено."
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": reply,
+                    "typing": False,
+                }
+            )
+            self.render_messages()
+            return
+
+        if plan.action == "voice_reply_status":
+            enabled = bool(self.app_settings.get("voice_reply_enabled", False))
+            reply = "озвучка відповідей увімкнена." if enabled else "озвучка відповідей вимкнена."
+
+            self.messages.append(
+                {
+                    "speaker": "sndi",
+                    "text": reply,
+                    "typing": False,
+                }
+            )
+            self.render_messages()
+
+            if enabled:
+                self._maybe_speak_reply(reply)
+
+            return
     
         if plan.action == "autostart_enable":
             reply = enable_autostart()
@@ -1686,6 +1737,8 @@ class ChatWindow(QWidget):
         if not reply or not reply.strip():
             reply = "глухий канал. нічого не бачу."
 
+        self._maybe_speak_reply(reply)
+
         if not self.messages or self.messages[-1]["speaker"] != "sndi":
             self.messages.append(
                 {
@@ -1705,6 +1758,8 @@ class ChatWindow(QWidget):
 
         if not reply or not reply.strip():
             reply = "шум глушить канал. повтори."
+
+        self._maybe_speak_reply(reply)
 
         if not self.messages or self.messages[-1]["speaker"] != "sndi":
             self.messages.append(
@@ -1814,6 +1869,8 @@ class ChatWindow(QWidget):
         if not reply or not reply.strip():
             reply = "системна дія не дала відповіді."
 
+        self._maybe_speak_reply(reply)
+
         try:
             append_history(user_text, reply)
         except Exception as error:
@@ -1881,6 +1938,8 @@ class ChatWindow(QWidget):
         if not reply or not reply.strip():
             reply = "web sensor мовчить. інтернет ніби є, але відповідь не зібралась."
 
+        self._maybe_speak_reply(reply)
+
         try:
             append_history(user_text, reply)
         except Exception as error:
@@ -1905,6 +1964,8 @@ class ChatWindow(QWidget):
 
         if not reply or not reply.strip():
             reply = "я бачу проєкт, але відповідь не зібралась. щось глухне на каналі."
+
+        self._maybe_speak_reply(reply)
 
         try:
             append_history(user_text, reply)
@@ -2030,6 +2091,40 @@ class ChatWindow(QWidget):
             )
             self.render_messages()
 
+    def _maybe_speak_reply(self, reply: str):
+        """
+        Speak SNDI reply only if voice_reply_enabled is true.
+        This is optional and must never break chat.
+        """
+        if not self.app_settings.get("voice_reply_enabled", False):
+            return
+
+        if not reply or not reply.strip():
+            return
+
+        if self.voice_reply_thread is not None and self.voice_reply_thread.isRunning():
+            print("[SNDI][TTS] skipped: previous voice reply still playing")
+            return
+
+        self.voice_reply_thread = VoiceReplyThread(reply)
+        self.voice_reply_thread.status_changed.connect(self._on_voice_status_changed)
+        self.voice_reply_thread.error.connect(self._on_voice_reply_error)
+        self.voice_reply_thread.start()
+
+    def _on_voice_reply_error(self, message: str):
+        message = (message or "озвучка дала збій.").strip()
+        print("[SNDI][TTS ERROR]", message)
+
+        self.set_status(True, "online")
+
+        self.messages.append(
+            {
+                "speaker": "sndi",
+                "text": message,
+                "typing": False,
+            }
+        )
+        self.render_messages()
 
 # ---------- app ----------
 def main():

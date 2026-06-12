@@ -340,6 +340,62 @@ def decide_action(user_text: str) -> ActionPlan:
     if any(
         phrase in text
         for phrase in (
+            "увімкни озвучку",
+            "включи озвучку",
+            "озвучуй відповіді",
+            "tts on",
+            "speak replies on",
+        )
+    ):
+        return ActionPlan(
+            action="voice_reply_enable",
+            target="tts",
+            query=user_text,
+            confidence=0.95,
+            requires_confirmation=False,
+            reason="user wants to enable voice replies",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
+            "вимкни озвучку",
+            "відключи озвучку",
+            "не озвучуй відповіді",
+            "tts off",
+            "speak replies off",
+        )
+    ):
+        return ActionPlan(
+            action="voice_reply_disable",
+            target="tts",
+            query=user_text,
+            confidence=0.95,
+            requires_confirmation=False,
+            reason="user wants to disable voice replies",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
+            "статус озвучки",
+            "чи увімкнена озвучка",
+            "tts status",
+            "speak replies status",
+        )
+    ):
+        return ActionPlan(
+            action="voice_reply_status",
+            target="tts",
+            query=user_text,
+            confidence=0.95,
+            requires_confirmation=False,
+            reason="user asks for voice reply status",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
             "слухай команду",
             "прослухай команду",
             "голосова команда",
