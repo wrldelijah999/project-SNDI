@@ -377,4 +377,14 @@ def execute_action(plan: ActionPlan, user_text: str) -> str | None:
 
         return get_git_summary()
     
+    if plan.action == "morning_brief":
+        from sndi.core.daily_brief import get_morning_brief
+
+        return get_morning_brief()
+
+    if plan.action == "evening_debrief":
+        from sndi.core.daily_brief import get_evening_debrief
+
+        return get_evening_debrief(plan.query or user_text)
+    
     return None
