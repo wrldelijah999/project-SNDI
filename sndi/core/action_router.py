@@ -387,4 +387,9 @@ def execute_action(plan: ActionPlan, user_text: str) -> str | None:
 
         return get_evening_debrief(plan.query or user_text)
     
+    if plan.action == "pc_health":
+        from sndi.tools.pc_health import get_pc_health_report
+
+        return get_pc_health_report()
+    
     return None
