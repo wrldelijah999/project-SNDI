@@ -43,6 +43,7 @@ from sndi.core.intents import is_screen_scan_intent, is_project_awareness_intent
 from sndi.tools.system_control import run_system_control_from_text
 from sndi.tools.project_context import build_project_snapshot
 from sndi.core.action_router import decide_action, execute_action
+from sndi.core.app_settings import load_app_settings, save_app_settings
 from sndi.tools.clipboard_tools import get_clipboard_text
 from sndi.services.openai_service import (
     analyze_image,
@@ -431,6 +432,8 @@ class ChatWindow(QWidget):
         self.streaming_text: str | None = None
         self.streaming_index = 0
         self.dot_phase = 0
+        # local app settings for v1.10 voice/tray/autostart
+        self.app_settings = load_app_settings()
 
         self.timer = QTimer()
         self.timer.timeout.connect(self._on_timer)
