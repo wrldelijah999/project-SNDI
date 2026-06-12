@@ -929,7 +929,7 @@ class ChatWindow(QWidget):
 
         if not user_text:
             return
-        
+
         self.input_field.clear()
         self.sound_manager.play_send()
 
@@ -940,6 +940,7 @@ class ChatWindow(QWidget):
                 "typing": False,
             }
         )
+        self.render_messages()
 
         plan = decide_action(user_text)
         print("[SNDI][ACTION ROUTER]", plan)
@@ -958,9 +959,8 @@ class ChatWindow(QWidget):
 
         if plan.action == "project_awareness":
             self._start_project_awareness(user_text)
-            
             return
-        
+
         if plan.action == "clipboard_explain":
             clipboard_text = get_clipboard_text()
 
@@ -987,8 +987,59 @@ class ChatWindow(QWidget):
             self._start_normal_response(enriched_prompt)
             return
 
-        reply = execute_action(plan, user_text)
+        if plan.action == "error_explain":
+            clipboard_text = get_clipboard_text()
 
+            error_markers = (
+                "traceback",
+                "error",
+                "exception",
+                "nameerror",
+                "typeerror",
+                "attributeerror",
+                "importerror",
+                "modulenotfounderror",
+                "syntaxerror",
+                "badrequesterror",
+                "filenotfounderror",
+            )
+
+            user_has_error_text = any(
+                marker in user_text.lower()
+                for marker in error_markers
+            )
+
+            source_text = user_text if user_has_error_text else clipboard_text
+
+            if not source_text.strip():
+                self.messages.append(
+                    {
+                        "speaker": "sndi",
+                        "text": "не бачу тексту помилки. скопіюй traceback або встав його в повідомлення.",
+                        "typing": False,
+                    }
+                )
+                self.render_messages()
+                return
+
+            enriched_prompt = (
+                "Режим: error_explain\n"
+                "Користувач просить пояснити технічну помилку.\n\n"
+                f"Запит користувача:\n{user_text}\n\n"
+                f"Текст помилки або traceback:\n{source_text}\n\n"
+                "Відповідай українською. "
+                "Поясни коротко:\n"
+                "1. що це за помилка;\n"
+                "2. найімовірніша причина;\n"
+                "3. де саме шукати проблему;\n"
+                "4. що зробити для фіксу.\n"
+                "Не роздувай відповідь. Дай практичні кроки."
+            )
+
+            self._start_normal_response(enriched_prompt)
+            return
+
+        reply = execute_action(plan, user_text)
 
         if reply:
             self.messages.append(
@@ -1002,7 +1053,6 @@ class ChatWindow(QWidget):
             return
 
         self._start_normal_response(user_text)
-
     # ---------- screen scan ----------
        # ---------- screen scan ----------
     # ---------- screen scan ----------
