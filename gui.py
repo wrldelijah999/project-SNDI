@@ -1039,7 +1039,66 @@ class ChatWindow(QWidget):
             self._start_normal_response(enriched_prompt)
             return
 
+        if plan.action == "code_review":
+            clipboard_text = get_clipboard_text()
+
+            code_markers = (
+                "def ",
+                "class ",
+                "import ",
+                "from ",
+                "return ",
+                "if ",
+                "for ",
+                "while ",
+                "try:",
+                "except",
+                "{",
+                "}",
+                "function ",
+                "const ",
+                "let ",
+                "var ",
+            )
+
+            user_has_code = any(
+                marker in user_text
+                for marker in code_markers
+            )
+
+            source_code = user_text if user_has_code else clipboard_text
+
+            if not source_code.strip():
+                self.messages.append(
+                    {
+                        "speaker": "sndi",
+                        "text": "не бачу коду. скопіюй код у буфер або встав його в повідомлення.",
+                        "typing": False,
+                    }
+                )
+                self.render_messages()
+                return
+
+            enriched_prompt = (
+                "Режим: code_review\n"
+                "Користувач просить перевірити код.\n\n"
+                f"Запит користувача:\n{user_text}\n\n"
+                f"Код для ревʼю:\n{source_code}\n\n"
+                "Відповідай українською. "
+                "Зроби практичне ревʼю коду:\n"
+                "1. коротко що робить код;\n"
+                "2. потенційні баги;\n"
+                "3. слабкі місця або ризики;\n"
+                "4. що покращити;\n"
+                "5. якщо є явний фікс — покажи маленький фрагмент, не переписуй усе без потреби.\n"
+                "Не роздувай відповідь. Дай конкретику."
+            )
+
+            self._start_normal_response(enriched_prompt)
+            return
+
         reply = execute_action(plan, user_text)
+
 
         if reply:
             self.messages.append(
@@ -1053,8 +1112,8 @@ class ChatWindow(QWidget):
             return
 
         self._start_normal_response(user_text)
-    # ---------- screen scan ----------
-       # ---------- screen scan ----------
+
+
     # ---------- screen scan ----------
     def _start_scan(self, user_text: str):
         """

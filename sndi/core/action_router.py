@@ -172,19 +172,48 @@ def decide_action(user_text: str) -> ActionPlan:
         phrase in text
         for phrase in (
             "перевір код",
+            "перевір цей код",
+            "перевір код в буфері",
+            "перевір код у буфері",
+            "глянь код",
+            "глянь цей код",
+            "переглянь код",
+            "проаналізуй код",
+            "проаналізуй цей код",
+            "що не так з кодом",
             "ревʼю коду",
             "рев'ю коду",
             "code review",
-            "що не так з кодом",
-            "проаналізуй код",
+            "review code",
         )
     ):
         return ActionPlan(
             action="code_review",
             query=user_text,
-            confidence=0.86,
+            confidence=0.9,
             requires_confirmation=False,
             reason="user asks for code review",
+        )
+    
+    if any(
+        phrase in text
+        for phrase in (
+            "що в буфері",
+            "в буфері",
+            "буфер обміну",
+            "скопійоване",
+            "clipboard",
+            "поясни це",
+            "поясни скопійоване",
+        )
+    ):
+        return ActionPlan(
+            action="clipboard_explain",
+            target="clipboard",
+            query=user_text,
+            confidence=0.85,
+            requires_confirmation=False,
+            reason="user refers to clipboard/copied content",
         )
 
     if any(
