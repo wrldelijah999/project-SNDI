@@ -56,6 +56,7 @@ from sndi.tools.autostart import (
     disable_autostart,
     get_autostart_status,
     is_autostart_enabled,
+    execute_file_mutation,
 )
 from sndi.services.openai_service import (
     analyze_image,
@@ -1495,25 +1496,59 @@ class ChatWindow(QWidget):
 
     def _execute_confirmed_pending_action(self, pending_action: PendingAction) -> str:
         """
-        Stage 10 placeholder.
+        Execute confirmed mutation action.
 
-        Real mutation execution will be connected in Stage 12.
-        For now this confirms safely and changes nothing.
+        v1.11 rule:
+        - this method is called only after explicit confirmation;
+        - read-only actions do not come here;
+        - file_edit_preview remains deferred to Stage 13.
         """
-        append_action_log(
+        mutation_actions = {
+            "file_create_folder",
+            "file_create_file",
+            "file_copy",
+            "file_move",
+            "file_rename",
+            "file_delete_safe",
+            "file_edit_preview",
+        }
+
+        if pending_action.action not in mutation_actions:
+            append_action_log(
+                action=pending_action.action,
+                status="failed",
+                target=pending_action.target,
+                user_text=pending_action.user_text,
+                preview=pending_action.preview,
+                error="unsupported_confirmed_action",
+                metadata={"pending_id": pending_action.id},
+            )
+
+            return (
+                "підтвердження прийнято, але ця дія не підтримується executor-ом:\n"
+                f"{pending_action.action}"
+            )
+
+        result = execute_file_mutation(
             action=pending_action.action,
-            status="failed",
-            target=pending_action.target,
+            params=pending_action.params,
+        )
+
+        append_action_log(
+            action=result.action,
+            status="executed" if result.ok else "failed",
+            target=result.target,
             user_text=pending_action.user_text,
             preview=pending_action.preview,
-            error="executor_not_connected_yet_stage_10",
-            metadata={"pending_id": pending_action.id},
+            result=result.data if result.ok else None,
+            error=result.error,
+            metadata={
+                "pending_id": pending_action.id,
+                "confirmed_action": pending_action.to_dict(),
+            },
         )
 
-        return (
-            "підтвердження прийнято, але executor ще не підключений.\n"
-            "На цьому stage нічого не змінено. Реальне виконання буде на Stage 12."
-        )
+        return result.message
 
     # ---------- events ----------
     def send_message(self):

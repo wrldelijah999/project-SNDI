@@ -1,10 +1,13 @@
-from __future__ import annotations
-
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 import difflib
 import os
+import shutil
+import uuid
+
+from sndi.core.app_paths import get_runtime_safe_trash_dir
 
 
 TEXT_EXTENSIONS = {
@@ -1069,3 +1072,532 @@ def build_text_replace_preview(
     )
     result.message = _build_preview_message(result)
     return result
+
+def _mutation_blocked_for_sensitive_paths(*paths: str | Path) -> str | None:
+    """
+    v1.11 safety guard.
+
+    We do not mutate Windows/system-sensitive locations.
+    This avoids accidental destructive operations in system folders.
+    """
+    for path in paths:
+        if path and is_system_sensitive_path(path):
+            return f"mutation blocked for system-sensitive path: {path}"
+
+    return None
+
+
+def _ensure_parent_exists(path: Path) -> FileOpResult | None:
+    parent = path.parent
+
+    if not parent.exists():
+        return FileOpResult(
+            ok=False,
+            action="parent_check",
+            target=str(path),
+            message=f"батьківська папка не існує: {parent}",
+            error="parent_not_found",
+        )
+
+    if not parent.is_dir():
+        return FileOpResult(
+            ok=False,
+            action="parent_check",
+            target=str(path),
+            message=f"parent існує, але це не папка: {parent}",
+            error="parent_not_directory",
+        )
+
+    return None
+
+
+def execute_create_folder(path: str | Path) -> FileOpResult:
+    action = "file_create_folder"
+
+    try:
+        target = normalize_path(path)
+
+        blocked = _mutation_blocked_for_sensitive_paths(target)
+        if blocked:
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(target),
+                message=f"заблоковано: {blocked}",
+                error="sensitive_path_blocked",
+            )
+
+        if target.exists():
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(target),
+                message=f"папка/файл уже існує: {target}",
+                error="target_exists",
+            )
+
+        target.mkdir(parents=True, exist_ok=False)
+
+        return FileOpResult(
+            ok=True,
+            action=action,
+            target=str(target),
+            message=f"папку створено: {target}",
+            data={
+                "path": str(target),
+                "type": "folder",
+                "created": True,
+            },
+        )
+
+    except Exception as error:
+        return FileOpResult(
+            ok=False,
+            action=action,
+            target=str(path),
+            message=f"не змогла створити папку: {error}",
+            error=str(error),
+        )
+
+
+def execute_create_text_file(
+    path: str | Path,
+    content: str = "",
+    overwrite: bool = False,
+) -> FileOpResult:
+    action = "file_create_file"
+
+    try:
+        target = normalize_path(path)
+
+        blocked = _mutation_blocked_for_sensitive_paths(target)
+        if blocked:
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(target),
+                message=f"заблоковано: {blocked}",
+                error="sensitive_path_blocked",
+            )
+
+        parent_error = _ensure_parent_exists(target)
+        if parent_error is not None:
+            parent_error.action = action
+            return parent_error
+
+        if target.exists() and not overwrite:
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(target),
+                message=f"файл уже існує, overwrite=False: {target}",
+                error="target_exists",
+            )
+
+        if target.exists() and target.is_dir():
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(target),
+                message=f"target існує і це папка, не файл: {target}",
+                error="target_is_directory",
+            )
+
+        target.write_text(content or "", encoding="utf-8")
+
+        return FileOpResult(
+            ok=True,
+            action=action,
+            target=str(target),
+            message=f"текстовий файл створено: {target}",
+            data={
+                "path": str(target),
+                "type": "file",
+                "size": target.stat().st_size,
+                "size_human": human_size(target.stat().st_size),
+                "overwrite": overwrite,
+            },
+        )
+
+    except Exception as error:
+        return FileOpResult(
+            ok=False,
+            action=action,
+            target=str(path),
+            message=f"не змогла створити файл: {error}",
+            error=str(error),
+        )
+
+
+def execute_copy_path(source: str | Path, destination: str | Path) -> FileOpResult:
+    action = "file_copy"
+
+    try:
+        source_path = normalize_path(source)
+        destination_path = normalize_path(destination)
+
+        blocked = _mutation_blocked_for_sensitive_paths(source_path, destination_path)
+        if blocked:
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(destination_path),
+                message=f"заблоковано: {blocked}",
+                error="sensitive_path_blocked",
+            )
+
+        if not source_path.exists():
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(destination_path),
+                message=f"source не існує: {source_path}",
+                error="source_not_found",
+            )
+
+        parent_error = _ensure_parent_exists(destination_path)
+        if parent_error is not None:
+            parent_error.action = action
+            return parent_error
+
+        if destination_path.exists():
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(destination_path),
+                message=f"destination уже існує, copy заблоковано: {destination_path}",
+                error="destination_exists",
+            )
+
+        if source_path.is_dir():
+            shutil.copytree(source_path, destination_path)
+            copied_type = "folder"
+            size = None
+            size_text = "(folder)"
+        else:
+            shutil.copy2(source_path, destination_path)
+            copied_type = "file"
+            size = destination_path.stat().st_size
+            size_text = human_size(size)
+
+        return FileOpResult(
+            ok=True,
+            action=action,
+            target=str(destination_path),
+            message=f"скопійовано: {source_path} → {destination_path}",
+            data={
+                "source": str(source_path),
+                "destination": str(destination_path),
+                "type": copied_type,
+                "size": size,
+                "size_human": size_text,
+            },
+        )
+
+    except Exception as error:
+        return FileOpResult(
+            ok=False,
+            action=action,
+            target=str(destination),
+            message=f"не змогла скопіювати: {error}",
+            error=str(error),
+        )
+
+
+def execute_move_path(source: str | Path, destination: str | Path) -> FileOpResult:
+    action = "file_move"
+
+    try:
+        source_path = normalize_path(source)
+        destination_path = normalize_path(destination)
+
+        blocked = _mutation_blocked_for_sensitive_paths(source_path, destination_path)
+        if blocked:
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(destination_path),
+                message=f"заблоковано: {blocked}",
+                error="sensitive_path_blocked",
+            )
+
+        if not source_path.exists():
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(destination_path),
+                message=f"source не існує: {source_path}",
+                error="source_not_found",
+            )
+
+        parent_error = _ensure_parent_exists(destination_path)
+        if parent_error is not None:
+            parent_error.action = action
+            return parent_error
+
+        if destination_path.exists():
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(destination_path),
+                message=f"destination уже існує, move заблоковано: {destination_path}",
+                error="destination_exists",
+            )
+
+        moved_path = shutil.move(str(source_path), str(destination_path))
+
+        return FileOpResult(
+            ok=True,
+            action=action,
+            target=str(destination_path),
+            message=f"переміщено: {source_path} → {destination_path}",
+            data={
+                "source": str(source_path),
+                "destination": str(destination_path),
+                "result_path": str(moved_path),
+            },
+        )
+
+    except Exception as error:
+        return FileOpResult(
+            ok=False,
+            action=action,
+            target=str(destination),
+            message=f"не змогла перемістити: {error}",
+            error=str(error),
+        )
+
+
+def execute_rename_path(path: str | Path, new_name: str) -> FileOpResult:
+    action = "file_rename"
+
+    try:
+        source_path = normalize_path(path)
+        clean_new_name = (new_name or "").strip().strip('"').strip("'")
+
+        if not clean_new_name:
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(source_path),
+                message="нова назва порожня.",
+                error="empty_new_name",
+            )
+
+        if "\\" in clean_new_name or "/" in clean_new_name:
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(source_path),
+                message="нова назва не має містити шлях або слеші. тільки імʼя файлу/папки.",
+                error="new_name_contains_path_separator",
+            )
+
+        destination_path = source_path.with_name(clean_new_name)
+
+        blocked = _mutation_blocked_for_sensitive_paths(source_path, destination_path)
+        if blocked:
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(source_path),
+                message=f"заблоковано: {blocked}",
+                error="sensitive_path_blocked",
+            )
+
+        if not source_path.exists():
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(source_path),
+                message=f"source не існує: {source_path}",
+                error="source_not_found",
+            )
+
+        if destination_path.exists():
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(source_path),
+                message=f"цільова назва вже існує: {destination_path}",
+                error="destination_exists",
+            )
+
+        source_path.rename(destination_path)
+
+        return FileOpResult(
+            ok=True,
+            action=action,
+            target=str(destination_path),
+            message=f"перейменовано: {source_path} → {destination_path}",
+            data={
+                "source": str(source_path),
+                "destination": str(destination_path),
+                "new_name": clean_new_name,
+            },
+        )
+
+    except Exception as error:
+        return FileOpResult(
+            ok=False,
+            action=action,
+            target=str(path),
+            message=f"не змогла перейменувати: {error}",
+            error=str(error),
+        )
+
+
+def _build_safe_trash_destination(source_path: Path) -> Path:
+    safe_trash_dir = get_runtime_safe_trash_dir()
+    safe_trash_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    unique = uuid.uuid4().hex[:8]
+    safe_name = f"{timestamp}_{unique}_{source_path.name}"
+
+    return safe_trash_dir / safe_name
+
+
+def execute_safe_delete_path(path: str | Path) -> FileOpResult:
+    """
+    Safe delete only.
+
+    Priority:
+    1. send2trash if installed;
+    2. fallback move to %APPDATA%\\SNDI\\safe_trash.
+
+    Never uses permanent delete.
+    """
+    action = "file_delete_safe"
+
+    try:
+        target = normalize_path(path)
+
+        blocked = _mutation_blocked_for_sensitive_paths(target)
+        if blocked:
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(target),
+                message=f"заблоковано: {blocked}",
+                error="sensitive_path_blocked",
+            )
+
+        if not target.exists():
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(target),
+                message=f"шлях не існує: {target}",
+                error="path_not_found",
+            )
+
+        original_info = _safe_stat(target)
+
+        try:
+            from send2trash import send2trash  # type: ignore
+
+            send2trash(str(target))
+
+            return FileOpResult(
+                ok=True,
+                action=action,
+                target=str(target),
+                message=f"переміщено в кошик: {target}",
+                data={
+                    "path": str(target),
+                    "method": "send2trash",
+                    "original_info": original_info,
+                },
+            )
+
+        except Exception as send2trash_error:
+            fallback_destination = _build_safe_trash_destination(target)
+            moved_path = shutil.move(str(target), str(fallback_destination))
+
+            return FileOpResult(
+                ok=True,
+                action=action,
+                target=str(target),
+                message=(
+                    "send2trash недоступний або впав, тому перемістила у safe_trash:\n"
+                    f"{target} → {fallback_destination}"
+                ),
+                data={
+                    "path": str(target),
+                    "method": "safe_trash_fallback",
+                    "safe_trash_path": str(fallback_destination),
+                    "result_path": str(moved_path),
+                    "send2trash_error": str(send2trash_error),
+                    "original_info": original_info,
+                },
+            )
+
+    except Exception as error:
+        return FileOpResult(
+            ok=False,
+            action=action,
+            target=str(path),
+            message=f"не змогла безпечно видалити: {error}",
+            error=str(error),
+        )
+
+
+def execute_file_mutation(action: str, params: dict[str, Any] | None = None) -> FileOpResult:
+    """
+    Execute confirmed file mutation.
+
+    This function must be called only after confirmation layer.
+    """
+    params = params or {}
+
+    if action == "file_create_folder":
+        return execute_create_folder(params.get("path", ""))
+
+    if action == "file_create_file":
+        return execute_create_text_file(
+            path=params.get("path", ""),
+            content=params.get("content", ""),
+            overwrite=bool(params.get("overwrite", False)),
+        )
+
+    if action == "file_copy":
+        return execute_copy_path(
+            source=params.get("source", ""),
+            destination=params.get("destination", ""),
+        )
+
+    if action == "file_move":
+        return execute_move_path(
+            source=params.get("source", ""),
+            destination=params.get("destination", ""),
+        )
+
+    if action == "file_rename":
+        return execute_rename_path(
+            path=params.get("path", ""),
+            new_name=params.get("new_name", ""),
+        )
+
+    if action == "file_delete_safe":
+        return execute_safe_delete_path(params.get("path", ""))
+
+    if action == "file_edit_preview":
+        return FileOpResult(
+            ok=False,
+            action=action,
+            target=str(params.get("path", "")),
+            message=(
+                "text edit execution ще не підключений.\n"
+                "Це буде Stage 13: backup + safe replace."
+            ),
+            error="text_edit_executor_deferred_stage_13",
+        )
+
+    return FileOpResult(
+        ok=False,
+        action=action,
+        target=str(params.get("path") or params.get("target") or ""),
+        message=f"невідома mutation дія: {action}",
+        error="unknown_mutation_action",
+    )
