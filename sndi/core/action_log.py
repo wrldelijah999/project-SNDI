@@ -230,18 +230,28 @@ def format_action_log_entry(entry: dict[str, Any], index: int | None = None) -> 
 
 
 def format_recent_actions(entries: list[dict[str, Any]] | None = None, limit: int = 20) -> str:
+    """
+    Backward-compatible readable action log formatter.
+
+    If entries are passed directly, format those entries.
+    Otherwise use the new action log viewer.
+    """
     if entries is None:
-        entries = get_recent_actions(limit=limit)
+        return format_recent_actions_view(limit=limit)
 
     if not entries:
         return "action log порожній."
 
-    lines = ["останні дії SNDI:"]
+    lines = [
+        f"SNDI action log — останні {len(entries)} дій:",
+        "",
+    ]
 
     for index, entry in enumerate(entries, start=1):
-        lines.append(format_action_log_entry(entry, index=index))
+        lines.append(format_action_log_entry_compact(entry, index=index))
+        lines.append("")
 
-    return "\n\n".join(lines)
+    return "\n".join(lines).rstrip()
 
 
 def get_action_log_status() -> str:
@@ -254,3 +264,185 @@ def get_action_log_status() -> str:
         f"- entries: {len(entries)}\n"
         f"- exists: {log_path.exists()}"
     )
+
+def _shorten(value: Any, max_chars: int = 160) -> str:
+    text = "" if value is None else str(value)
+    text = text.replace("\n", " ").replace("\r", " ").strip()
+
+    if len(text) > max_chars:
+        return text[:max_chars].rstrip() + "…"
+
+    return text
+
+
+def _status_icon(status: str) -> str:
+    normalized = (status or "").lower().strip()
+
+    if normalized == "executed":
+        return "✅"
+
+    if normalized == "confirmed":
+        return "☑️"
+
+    if normalized == "requested":
+        return "🕓"
+
+    if normalized == "cancelled":
+        return "🚫"
+
+    if normalized == "failed":
+        return "⚠️"
+
+    return "•"
+
+
+def _risk_from_entry(entry: dict[str, Any]) -> str:
+    metadata = entry.get("metadata") or {}
+    preview = entry.get("preview") or {}
+
+    if isinstance(metadata, dict):
+        confirmed = metadata.get("confirmed_action") or {}
+
+        if isinstance(confirmed, dict):
+            risk = confirmed.get("risk_level")
+
+            if risk:
+                return str(risk)
+
+    if isinstance(preview, dict):
+        risk = preview.get("risk_level") or preview.get("risk")
+
+        if risk:
+            return str(risk)
+
+    return ""
+
+
+def format_action_log_entry_compact(entry: dict[str, Any], index: int | None = None) -> str:
+    prefix = f"{index}. " if index is not None else ""
+
+    status = str(entry.get("status", "?"))
+    action = str(entry.get("action", "?"))
+    target = _shorten(entry.get("target") or "(no target)", 180)
+    timestamp = _shorten(entry.get("timestamp", "?"), 32)
+    error = entry.get("error")
+    risk = _risk_from_entry(entry)
+
+    icon = _status_icon(status)
+
+    lines = [
+        f"{prefix}{icon} {action} — {status}",
+        f"   target: {target}",
+        f"   time: {timestamp}",
+    ]
+
+    if risk:
+        lines.append(f"   risk: {risk}")
+
+    if error:
+        lines.append(f"   error: {_shorten(error, 220)}")
+
+    return "\n".join(lines)
+
+
+def format_recent_actions_view(
+    limit: int = 20,
+    status_filter: str | None = None,
+    action_filter: str | None = None,
+) -> str:
+    entries = get_recent_actions(limit=100)
+
+    if status_filter:
+        wanted = status_filter.lower().strip()
+        entries = [
+            entry for entry in entries
+            if str(entry.get("status", "")).lower().strip() == wanted
+        ]
+
+    if action_filter:
+        wanted_action = action_filter.lower().strip()
+        entries = [
+            entry for entry in entries
+            if wanted_action in str(entry.get("action", "")).lower()
+        ]
+
+    limit = max(1, min(int(limit or 20), 50))
+    entries = entries[-limit:]
+
+    if not entries:
+        return "action log порожній або немає дій за таким фільтром."
+
+    lines = [
+        f"SNDI action log — останні {len(entries)} дій:",
+        "",
+    ]
+
+    for index, entry in enumerate(entries, start=1):
+        lines.append(format_action_log_entry_compact(entry, index=index))
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
+
+
+def get_action_log_stats() -> dict[str, Any]:
+    entries = _load_action_log_lines()
+
+    stats: dict[str, Any] = {
+        "path": str(get_action_log_path()),
+        "exists": get_action_log_path().exists(),
+        "total": len(entries),
+        "by_status": {},
+        "by_action": {},
+        "last_timestamp": None,
+    }
+
+    for entry in entries:
+        status = str(entry.get("status", "unknown"))
+        action = str(entry.get("action", "unknown"))
+
+        stats["by_status"][status] = stats["by_status"].get(status, 0) + 1
+        stats["by_action"][action] = stats["by_action"].get(action, 0) + 1
+        stats["last_timestamp"] = entry.get("timestamp") or stats["last_timestamp"]
+
+    return stats
+
+
+def format_action_log_stats() -> str:
+    stats = get_action_log_stats()
+
+    lines = [
+        "SNDI action log status:",
+        f"- path: {stats.get('path')}",
+        f"- exists: {stats.get('exists')}",
+        f"- total entries: {stats.get('total')}",
+        f"- last timestamp: {stats.get('last_timestamp') or '(none)'}",
+        "",
+        "by status:",
+    ]
+
+    by_status = stats.get("by_status") or {}
+
+    if by_status:
+        for status, count in sorted(by_status.items()):
+            lines.append(f"- {status}: {count}")
+    else:
+        lines.append("- empty")
+
+    lines.append("")
+    lines.append("top actions:")
+
+    by_action = stats.get("by_action") or {}
+
+    if by_action:
+        top_actions = sorted(
+            by_action.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )[:12]
+
+        for action, count in top_actions:
+            lines.append(f"- {action}: {count}")
+    else:
+        lines.append("- empty")
+
+    return "\n".join(lines)

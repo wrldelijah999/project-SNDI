@@ -726,6 +726,23 @@ def decide_action(user_text: str) -> ActionPlan:
     if any(
         phrase in text
         for phrase in (
+            "статус action log",
+            "статус логів дій",
+            "action log status",
+            "статистика дій",
+        )
+    ):
+        return _file_plan(
+            action="action_log_status",
+            user_text=user_text,
+            target="action_log",
+            confidence=0.95,
+            reason="user asks for action log status/statistics",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
             "покажи action log",
             "останні дії",
             "що ти робила з файлами",
