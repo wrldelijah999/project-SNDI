@@ -3,6 +3,7 @@ import sys
 import os
 import re
 import math
+import json
 import random
 
 from PyQt6.QtWidgets import (
@@ -49,6 +50,12 @@ from sndi.tools.project_context import build_project_snapshot
 from sndi.core.action_router import decide_action, execute_action
 from sndi.core.app_settings import load_app_settings, save_app_settings, set_app_setting
 from sndi.tools.clipboard_tools import get_clipboard_text
+from sndi.core.app_paths import get_project_root, get_runtime_status
+from sndi.core.action_log import (
+    append_action_log,
+    format_recent_actions,
+    format_action_log_stats,
+)
 from sndi.services.voice_reply_service import VoiceReplyThread
 from sndi.services.voice_service import VoiceListenOnceThread, VoiceWakeLoopThread
 from sndi.tools.autostart import (
@@ -56,6 +63,7 @@ from sndi.tools.autostart import (
     disable_autostart,
     get_autostart_status,
     is_autostart_enabled,
+    execute_file_mutation,
 )
 from sndi.services.openai_service import (
     analyze_image,
@@ -64,6 +72,37 @@ from sndi.services.openai_service import (
     call_web_search,
     decide_system_action,
     looks_like_system_request
+)
+from sndi.core.action_log import append_action_log
+from sndi.core.confirmation import (
+    ConfirmationManager,
+    PendingAction,
+    format_no_pending_action_message,
+    format_pending_action_cancelled_message,
+    format_pending_action_expired_message,
+    format_pending_action_message,
+    is_cancel_text,
+    is_confirmation_text,
+)
+from sndi.tools.windows_shortcuts import (
+    create_all_shortcuts,
+    remove_all_shortcuts,
+    get_shortcut_status,
+)
+
+from sndi.tools.safe_file_ops import (
+    get_path_info,
+    list_directory,
+    find_paths,
+    read_text_preview,
+    open_path,
+    build_create_folder_preview,
+    build_create_text_file_preview,
+    build_copy_path_preview,
+    build_move_path_preview,
+    build_rename_path_preview,
+    build_delete_path_preview,
+    build_text_replace_preview,
 )
 
 
@@ -450,6 +489,8 @@ class ChatWindow(QWidget):
         self.dot_phase = 0
         # local app settings for v1.10 voice/tray/autostart
         self.app_settings = load_app_settings()
+        # v1.11 confirmation layer for safe mutation actions
+        self.confirmation_manager = ConfirmationManager()
 
         # tray state
         self.force_quit = False
@@ -1358,6 +1399,489 @@ class ChatWindow(QWidget):
         self.chat_area.setHtml("".join(html_parts))
         self.chat_area.moveCursor(QTextCursor.MoveOperation.End)
 
+    def _append_sndi_message(self, text: str):
+        self.messages.append(
+            {
+                "speaker": "sndi",
+                "text": text,
+                "typing": False,
+            }
+        )
+        self.render_messages()
+
+    def _handle_confirmation_intent(self, user_text: str) -> bool:
+        """
+        Handle confirm/cancel only when there is a pending action.
+
+        Returns True when the user_text was consumed by confirmation flow.
+        """
+        if not self.confirmation_manager.has_any_pending_action():
+            return False
+
+        if not is_confirmation_text(user_text) and not is_cancel_text(user_text):
+            return False
+
+        expired_action = self.confirmation_manager.pop_expired_pending_action()
+
+        if expired_action is not None:
+            append_action_log(
+                action=expired_action.action,
+                status="cancelled",
+                target=expired_action.target,
+                user_text=user_text,
+                preview=expired_action.preview,
+                error="pending action expired",
+                metadata={"pending_id": expired_action.id},
+            )
+            self._append_sndi_message(format_pending_action_expired_message())
+            return True
+
+        if is_cancel_text(user_text):
+            pending_action = self.confirmation_manager.cancel_pending_action()
+
+            append_action_log(
+                action=pending_action.action if pending_action else "unknown_pending_action",
+                status="cancelled",
+                target=pending_action.target if pending_action else None,
+                user_text=user_text,
+                preview=pending_action.preview if pending_action else {},
+                metadata={
+                    "pending_id": pending_action.id if pending_action else None,
+                    "reason": "user_cancelled",
+                },
+            )
+
+            self._append_sndi_message(
+                format_pending_action_cancelled_message(pending_action)
+            )
+            return True
+
+        if is_confirmation_text(user_text):
+            pending_action = self.confirmation_manager.confirm_pending_action()
+
+            if pending_action is None:
+                append_action_log(
+                    action="confirm_pending_action",
+                    status="failed",
+                    target=None,
+                    user_text=user_text,
+                    error="no active pending action",
+                )
+                self._append_sndi_message(format_no_pending_action_message())
+                return True
+
+            append_action_log(
+                action=pending_action.action,
+                status="confirmed",
+                target=pending_action.target,
+                user_text=user_text,
+                preview=pending_action.preview,
+                metadata={"pending_id": pending_action.id},
+            )
+
+            reply = self._execute_confirmed_pending_action(pending_action)
+            self._append_sndi_message(reply)
+            return True
+
+        return False
+
+    def _create_pending_action_from_preview(
+        self,
+        preview,
+        params: dict | None = None,
+        user_text: str = "",
+    ):
+        """
+        Create pending action from FileOpPreview-like object.
+
+        Stage 10:
+        - creates pending action;
+        - writes requested event to action log;
+        - shows confirmation message;
+        - does not execute anything yet.
+        """
+        pending_action = self.confirmation_manager.create_pending_action(
+            action=preview.action,
+            target=preview.target,
+            params=params or {},
+            preview=preview.preview,
+            risk_level=preview.risk_level,
+            user_text=user_text,
+        )
+
+        append_action_log(
+            action=pending_action.action,
+            status="requested",
+            target=pending_action.target,
+            user_text=user_text,
+            preview=pending_action.preview,
+            metadata={"pending_id": pending_action.id},
+        )
+
+        self._append_sndi_message(format_pending_action_message(pending_action))
+        return pending_action
+
+    def _execute_confirmed_pending_action(self, pending_action: PendingAction) -> str:
+        """
+        Execute confirmed mutation action.
+
+        v1.11 rule:
+        - this method is called only after explicit confirmation;
+        - read-only actions do not come here;
+        - file_edit_preview remains deferred to Stage 13.
+        """
+        mutation_actions = {
+            "file_create_folder",
+            "file_create_file",
+            "file_copy",
+            "file_move",
+            "file_rename",
+            "file_delete_safe",
+            "file_edit_preview",
+        }
+
+        if pending_action.action not in mutation_actions:
+            append_action_log(
+                action=pending_action.action,
+                status="failed",
+                target=pending_action.target,
+                user_text=pending_action.user_text,
+                preview=pending_action.preview,
+                error="unsupported_confirmed_action",
+                metadata={"pending_id": pending_action.id},
+            )
+
+            return (
+                "підтвердження прийнято, але ця дія не підтримується executor-ом:\n"
+                f"{pending_action.action}"
+            )
+
+        result = execute_file_mutation(
+            action=pending_action.action,
+            params=pending_action.params,
+        )
+
+        append_action_log(
+            action=result.action,
+            status="executed" if result.ok else "failed",
+            target=result.target,
+            user_text=pending_action.user_text,
+            preview=pending_action.preview,
+            result=result.data if result.ok else None,
+            error=result.error,
+            metadata={
+                "pending_id": pending_action.id,
+                "confirmed_action": pending_action.to_dict(),
+            },
+        )
+
+        return result.message
+    
+    def _handle_app_mode_action(self, plan, user_text: str) -> bool:
+        if plan.action == "app_runtime_status":
+            status = get_runtime_status()
+            reply = (
+                "SNDI runtime status:\n"
+                f"- mode: {status.get('mode')}\n"
+                f"- frozen: {status.get('is_frozen')}\n"
+                f"- executable: {status.get('executable_path')}\n"
+                f"- project root: {status.get('project_root')}\n"
+                f"- bundle root: {status.get('bundle_root')}\n"
+                f"- app data: {status.get('app_data_dir')}\n"
+                f"- memory: {status.get('runtime_memory_dir')}"
+            )
+            self._append_sndi_message(reply)
+            return True
+
+        if plan.action == "app_build_status":
+            project_root = get_project_root()
+            exe_path = project_root / "dist" / "SNDI" / "SNDI.exe"
+            spec_path = project_root / "SNDI.spec"
+
+            reply = (
+                "SNDI build status:\n"
+                f"- project root: {project_root}\n"
+                f"- spec exists: {spec_path.exists()} — {spec_path}\n"
+                f"- exe exists: {exe_path.exists()} — {exe_path}"
+            )
+            self._append_sndi_message(reply)
+            return True
+
+        if plan.action == "app_install_shortcuts":
+            reply = create_all_shortcuts()
+            append_action_log(
+                action=plan.action,
+                status="executed",
+                target="windows_shortcuts",
+                user_text=user_text,
+                result=reply,
+            )
+            self._append_sndi_message(reply)
+            return True
+
+        if plan.action == "app_remove_shortcuts":
+            reply = remove_all_shortcuts()
+            append_action_log(
+                action=plan.action,
+                status="executed",
+                target="windows_shortcuts",
+                user_text=user_text,
+                result=reply,
+            )
+            self._append_sndi_message(reply)
+            return True
+
+        return False
+
+    def _handle_readonly_file_action(self, plan, user_text: str) -> bool:
+        readonly_actions = {
+            "file_list",
+            "file_find",
+            "file_open",
+            "file_read_preview",
+            "action_log_show",
+            "action_log_status",
+        }
+
+        if plan.action not in readonly_actions:
+            return False
+
+        try:
+            if plan.action == "action_log_show":
+                reply = format_recent_actions(limit=20)
+                self._append_sndi_message(reply)
+                return True
+            
+            if plan.action == "action_log_status":
+                reply = format_action_log_stats()
+                self._append_sndi_message(reply)
+                return True
+
+            metadata = plan.metadata or {}
+
+            if plan.action == "file_list":
+                path = metadata.get("path") or plan.target
+
+                if not path:
+                    self._append_sndi_message(
+                        "вкажи шлях до папки. приклад: покажи файли в \"C:\\SNDI_TEST_SAFE_OPS\""
+                    )
+                    return True
+
+                result = list_directory(path)
+
+            elif plan.action == "file_find":
+                root = metadata.get("root") or plan.target
+                query = metadata.get("query") or ""
+
+                if not root or not query:
+                    self._append_sndi_message(
+                        "вкажи що шукати і де. приклад: знайди файл \"hello\" в \"C:\\SNDI_TEST_SAFE_OPS\""
+                    )
+                    return True
+
+                result = find_paths(root, query)
+
+            elif plan.action == "file_open":
+                path = metadata.get("path") or plan.target
+
+                if not path:
+                    self._append_sndi_message(
+                        "вкажи шлях. приклад: відкрий папку \"C:\\SNDI_TEST_SAFE_OPS\""
+                    )
+                    return True
+
+                result = open_path(path)
+
+            elif plan.action == "file_read_preview":
+                path = metadata.get("path") or plan.target
+
+                if not path:
+                    self._append_sndi_message(
+                        "вкажи шлях до файлу. приклад: прочитай файл \"C:\\SNDI_TEST_SAFE_OPS\\hello.txt\""
+                    )
+                    return True
+
+                result = read_text_preview(path)
+
+            else:
+                return False
+
+            append_action_log(
+                action=result.action,
+                status="executed" if result.ok else "failed",
+                target=result.target,
+                user_text=user_text,
+                preview=result.data,
+                result=result.message if result.ok else None,
+                error=result.error,
+            )
+
+            self._append_sndi_message(result.message)
+            return True
+
+        except Exception as error:
+            append_action_log(
+                action=plan.action,
+                status="failed",
+                target=plan.target,
+                user_text=user_text,
+                error=str(error),
+            )
+            self._append_sndi_message(f"file action впала: {error}")
+            return True
+
+    def _handle_file_mutation_preview_action(self, plan, user_text: str) -> bool:
+        mutation_actions = {
+            "file_create_folder",
+            "file_create_file",
+            "file_copy",
+            "file_move",
+            "file_rename",
+            "file_delete_safe",
+            "file_edit_preview",
+        }
+
+        if plan.action not in mutation_actions:
+            return False
+
+        metadata = plan.metadata or {}
+
+        try:
+            if plan.action == "file_create_folder":
+                path = metadata.get("path") or plan.target
+
+                if not path:
+                    self._append_sndi_message(
+                        "вкажи шлях. приклад: створи папку \"C:\\SNDI_TEST_SAFE_OPS\\new_folder\""
+                    )
+                    return True
+
+                preview = build_create_folder_preview(path)
+                params = {"path": path}
+
+            elif plan.action == "file_create_file":
+                path = metadata.get("path") or plan.target
+                content = metadata.get("content", "")
+                overwrite = bool(metadata.get("overwrite", False))
+
+                if not path:
+                    self._append_sndi_message(
+                        "вкажи шлях. приклад: створи файл \"C:\\SNDI_TEST_SAFE_OPS\\new.txt\" з текстом hello"
+                    )
+                    return True
+
+                preview = build_create_text_file_preview(
+                    path=path,
+                    content=content,
+                    overwrite=overwrite,
+                )
+                params = {
+                    "path": path,
+                    "content": content,
+                    "overwrite": overwrite,
+                }
+
+            elif plan.action == "file_copy":
+                source = metadata.get("source", "")
+                destination = metadata.get("destination", "")
+
+                if not source or not destination:
+                    self._append_sndi_message(
+                        "вкажи source і destination у лапках. приклад: скопіюй файл \"C:\\SNDI_TEST_SAFE_OPS\\hello.txt\" в \"C:\\SNDI_TEST_SAFE_OPS\\hello_copy.txt\""
+                    )
+                    return True
+
+                preview = build_copy_path_preview(source, destination)
+                params = {
+                    "source": source,
+                    "destination": destination,
+                }
+
+            elif plan.action == "file_move":
+                source = metadata.get("source", "")
+                destination = metadata.get("destination", "")
+
+                if not source or not destination:
+                    self._append_sndi_message(
+                        "вкажи source і destination у лапках. приклад: перемісти файл \"C:\\SNDI_TEST_SAFE_OPS\\hello.txt\" в \"C:\\SNDI_TEST_SAFE_OPS\\moved_hello.txt\""
+                    )
+                    return True
+
+                preview = build_move_path_preview(source, destination)
+                params = {
+                    "source": source,
+                    "destination": destination,
+                }
+
+            elif plan.action == "file_rename":
+                path = metadata.get("path") or plan.target
+                new_name = metadata.get("new_name", "")
+
+                if not path or not new_name:
+                    self._append_sndi_message(
+                        "вкажи шлях і нову назву. приклад: перейменуй файл \"C:\\SNDI_TEST_SAFE_OPS\\hello.txt\" на \"renamed_hello.txt\""
+                    )
+                    return True
+
+                preview = build_rename_path_preview(path, new_name)
+                params = {
+                    "path": path,
+                    "new_name": new_name,
+                }
+
+            elif plan.action == "file_delete_safe":
+                path = metadata.get("path") or plan.target
+
+                if not path:
+                    self._append_sndi_message(
+                        "вкажи шлях. приклад: видали файл \"C:\\SNDI_TEST_SAFE_OPS\\hello.txt\""
+                    )
+                    return True
+
+                preview = build_delete_path_preview(path)
+                params = {"path": path}
+
+            elif plan.action == "file_edit_preview":
+                path = metadata.get("path") or plan.target
+                old_text = metadata.get("old_text", "")
+                new_text = metadata.get("new_text", "")
+
+                if not path or not old_text:
+                    self._append_sndi_message(
+                        "для v1.11 підтримую тільки просту заміну. приклад: заміни \"hello\" на \"yo\" у файлі \"C:\\SNDI_TEST_SAFE_OPS\\hello.txt\""
+                    )
+                    return True
+
+                preview = build_text_replace_preview(path, old_text, new_text)
+                params = {
+                    "path": path,
+                    "old_text": old_text,
+                    "new_text": new_text,
+                }
+
+            else:
+                return False
+
+            self._create_pending_action_from_preview(
+                preview=preview,
+                params=params,
+                user_text=user_text,
+            )
+            return True
+
+        except Exception as error:
+            append_action_log(
+                action=plan.action,
+                status="failed",
+                target=plan.target,
+                user_text=user_text,
+                error=str(error),
+            )
+            self._append_sndi_message(f"не змогла підготувати preview: {error}")
+            return True
+        
+
     # ---------- events ----------
     def send_message(self):
         user_text = self.input_field.text().strip()
@@ -1398,6 +1922,15 @@ class ChatWindow(QWidget):
 
         plan = decide_action(user_text)
         print("[SNDI][ACTION ROUTER]", plan)
+
+        if self._handle_app_mode_action(plan, user_text):
+            return
+
+        if self._handle_readonly_file_action(plan, user_text):
+            return
+
+        if self._handle_file_mutation_preview_action(plan, user_text):
+            return
 
         if plan.action == "screen_scan":
             self._start_scan(user_text)
@@ -1441,6 +1974,10 @@ class ChatWindow(QWidget):
                 }
             )
             self.render_messages()
+
+            if self._handle_confirmation_intent(user_text):
+                return
+            
             self._hide_to_tray()
             return
 

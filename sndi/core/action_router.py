@@ -57,6 +57,189 @@ def looks_like_system_request(user_text: str) -> bool:
 
     return any(phrase in text for phrase in system_phrases)
 
+def _extract_quoted_values(user_text: str) -> list[str]:
+    """
+    Extract values inside quotes.
+
+    Supports:
+    - "path"
+    - 'path'
+    - «path»
+    """
+    text = user_text or ""
+
+    values: list[str] = []
+    values.extend(re.findall(r'"([^"]+)"', text))
+    values.extend(re.findall(r"'([^']+)'", text))
+    values.extend(re.findall(r"«([^»]+)»", text))
+
+    return [value.strip() for value in values if value.strip()]
+
+
+def _looks_like_windows_path(value: str) -> bool:
+    value = (value or "").strip()
+
+    if not value:
+        return False
+
+    lowered = value.lower()
+
+    return (
+        bool(re.match(r"^[a-zA-Z]:[\\/]", value))
+        or lowered.startswith("%userprofile%")
+        or lowered.startswith("%appdata%")
+        or lowered.startswith("~")
+        or "\\" in value
+        or "/" in value
+    )
+
+
+def _extract_first_path(user_text: str) -> str:
+    """
+    Conservative path extraction.
+
+    Priority:
+    1. quoted value;
+    2. Windows path like C:\\... until sentence end;
+    3. empty string.
+    """
+    quoted = _extract_quoted_values(user_text)
+
+    for item in quoted:
+        if _looks_like_windows_path(item):
+            return item
+
+    # C:\Something\Something.txt
+    match = re.search(r"([a-zA-Z]:[\\/][^\n\r]+)", user_text or "")
+
+    if match:
+        value = match.group(1).strip()
+
+        # Trim common trailing command words if user wrote a sentence.
+        for stop_word in (
+            " в ",
+            " до ",
+            " як ",
+            " на ",
+            " from ",
+            " to ",
+        ):
+            if stop_word in value:
+                value = value.split(stop_word, 1)[0].strip()
+
+        return value.strip().strip('"').strip("'")
+
+    return ""
+
+
+def _extract_two_paths(user_text: str) -> tuple[str, str]:
+    """
+    Extract source and destination.
+
+    Best UX: user should quote paths:
+    скопіюй "C:\\a.txt" в "C:\\b.txt"
+    """
+    quoted = _extract_quoted_values(user_text)
+
+    if len(quoted) >= 2:
+        return quoted[0], quoted[1]
+
+    text = user_text or ""
+
+    # fallback: source to destination with simple unquoted Windows paths
+    matches = re.findall(r"([a-zA-Z]:[\\/][^\n\r\"']+)", text)
+
+    if len(matches) >= 2:
+        return matches[0].strip(), matches[1].strip()
+
+    return "", ""
+
+
+def _extract_find_query_and_root(user_text: str) -> tuple[str, str]:
+    """
+    Expected:
+    знайди файл "hello" в "C:\\SNDI_TEST_SAFE_OPS"
+    """
+    quoted = _extract_quoted_values(user_text)
+
+    if len(quoted) >= 2:
+        return quoted[0], quoted[1]
+
+    if len(quoted) == 1:
+        first = quoted[0]
+
+        if _looks_like_windows_path(first):
+            return "", first
+
+        root = _extract_first_path(user_text)
+        return first, root
+
+    return "", _extract_first_path(user_text)
+
+
+def _extract_new_name(user_text: str) -> str:
+    """
+    Expected:
+    перейменуй "C:\\a.txt" на "b.txt"
+    """
+    quoted = _extract_quoted_values(user_text)
+
+    if len(quoted) >= 2:
+        return quoted[1]
+
+    lowered = (user_text or "").lower()
+
+    if " на " in lowered:
+        return (user_text or "").split(" на ", 1)[1].strip().strip('"').strip("'")
+
+    return ""
+
+
+def _extract_create_file_content(user_text: str) -> str:
+    lowered = (user_text or "").lower()
+
+    for marker in (" з текстом ", " із текстом ", " with text "):
+        if marker in lowered:
+            index = lowered.find(marker)
+            return user_text[index + len(marker):].strip().strip('"').strip("'")
+
+    return ""
+
+
+def _extract_replace_parts(user_text: str) -> tuple[str, str, str]:
+    """
+    Expected:
+    заміни "old" на "new" у файлі "C:\\file.txt"
+
+    Returns:
+    old_text, new_text, path
+    """
+    quoted = _extract_quoted_values(user_text)
+
+    if len(quoted) >= 3:
+        return quoted[0], quoted[1], quoted[2]
+
+    return "", "", _extract_first_path(user_text)
+
+
+def _file_plan(
+    action: str,
+    user_text: str,
+    target: str = "",
+    confidence: float = 0.92,
+    metadata: dict | None = None,
+    reason: str = "",
+):
+    return ActionPlan(
+        action=action,
+        target=target,
+        query=user_text,
+        confidence=confidence,
+        requires_confirmation=False,
+        reason=reason or f"v1.11 file/app action: {action}",
+        metadata=metadata or {},
+    )
+
 
 def decide_action(user_text: str) -> ActionPlan:
     """
@@ -467,6 +650,342 @@ def decide_action(user_text: str) -> ActionPlan:
             requires_confirmation=False,
             reason="user wants to toggle voice mode",
         )
+    
+        # ---------- v1.11 app mode actions ----------
+    if any(
+        phrase in text
+        for phrase in (
+            "закріпи себе як програму",
+            "створи ярлик",
+            "створи ярлик на робочому столі",
+            "додай себе в пуск",
+            "install shortcuts",
+        )
+    ):
+        return _file_plan(
+            action="app_install_shortcuts",
+            user_text=user_text,
+            target="windows_shortcuts",
+            confidence=0.95,
+            reason="user wants to install SNDI shortcuts",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
+            "прибери ярлик",
+            "видали ярлик",
+            "remove shortcuts",
+            "uninstall shortcuts",
+        )
+    ):
+        return _file_plan(
+            action="app_remove_shortcuts",
+            user_text=user_text,
+            target="windows_shortcuts",
+            confidence=0.95,
+            reason="user wants to remove SNDI shortcuts",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
+            "статус програми",
+            "ти dev чи exe",
+            "ти dev або exe",
+            "app status",
+            "runtime status",
+        )
+    ):
+        return _file_plan(
+            action="app_runtime_status",
+            user_text=user_text,
+            target="runtime",
+            confidence=0.95,
+            reason="user asks for SNDI runtime status",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
+            "статус білда",
+            "статус build",
+            "build status",
+            "статус exe",
+        )
+    ):
+        return _file_plan(
+            action="app_build_status",
+            user_text=user_text,
+            target="build",
+            confidence=0.95,
+            reason="user asks for SNDI build status",
+        )
+
+    # ---------- v1.11 action log ----------
+    if any(
+        phrase in text
+        for phrase in (
+            "статус action log",
+            "статус логів дій",
+            "action log status",
+            "статистика дій",
+        )
+    ):
+        return _file_plan(
+            action="action_log_status",
+            user_text=user_text,
+            target="action_log",
+            confidence=0.95,
+            reason="user asks for action log status/statistics",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
+            "покажи action log",
+            "останні дії",
+            "що ти робила з файлами",
+            "історія дій",
+            "action log",
+        )
+    ):
+        return _file_plan(
+            action="action_log_show",
+            user_text=user_text,
+            target="action_log",
+            confidence=0.95,
+            reason="user asks for recent SNDI actions",
+        )
+
+    # ---------- v1.11 read-only file actions ----------
+    if any(
+        phrase in text
+        for phrase in (
+            "покажи файли в",
+            "список файлів",
+            "що в папці",
+            "list folder",
+            "list directory",
+        )
+    ):
+        path = _extract_first_path(user_text)
+        return _file_plan(
+            action="file_list",
+            user_text=user_text,
+            target=path,
+            metadata={"path": path},
+            reason="user wants to list directory",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
+            "знайди файл",
+            "знайди папку",
+            "пошук файлу",
+            "find file",
+            "find folder",
+        )
+    ):
+        query, root = _extract_find_query_and_root(user_text)
+        return _file_plan(
+            action="file_find",
+            user_text=user_text,
+            target=root,
+            metadata={"root": root, "query": query},
+            reason="user wants to find file/folder",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
+            "прочитай файл",
+            "покажи preview файлу",
+            "preview файлу",
+            "read file",
+            "read preview",
+        )
+    ):
+        path = _extract_first_path(user_text)
+        return _file_plan(
+            action="file_read_preview",
+            user_text=user_text,
+            target=path,
+            metadata={"path": path},
+            reason="user wants text file preview",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
+            "відкрий папку",
+            "відкрий файл",
+            "open folder",
+            "open file",
+        )
+    ):
+        path = _extract_first_path(user_text)
+        return _file_plan(
+            action="file_open",
+            user_text=user_text,
+            target=path,
+            metadata={"path": path},
+            reason="user wants to open a file/folder path",
+        )
+
+    # ---------- v1.11 mutation preview actions ----------
+    if any(
+        phrase in text
+        for phrase in (
+            "створи папку",
+            "створити папку",
+            "create folder",
+            "make folder",
+        )
+    ):
+        path = _extract_first_path(user_text)
+        return _file_plan(
+            action="file_create_folder",
+            user_text=user_text,
+            target=path,
+            metadata={"path": path},
+            reason="user wants to create folder with confirmation",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
+            "створи файл",
+            "створити файл",
+            "create file",
+        )
+    ):
+        path = _extract_first_path(user_text)
+        content = _extract_create_file_content(user_text)
+
+        return _file_plan(
+            action="file_create_file",
+            user_text=user_text,
+            target=path,
+            metadata={
+                "path": path,
+                "content": content,
+                "overwrite": False,
+            },
+            reason="user wants to create file with confirmation",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
+            "скопіюй файл",
+            "скопіюй папку",
+            "копіюй файл",
+            "copy file",
+            "copy folder",
+        )
+    ):
+        source, destination = _extract_two_paths(user_text)
+
+        return _file_plan(
+            action="file_copy",
+            user_text=user_text,
+            target=destination,
+            metadata={
+                "source": source,
+                "destination": destination,
+            },
+            reason="user wants to copy path with confirmation",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
+            "перемісти файл",
+            "перемісти папку",
+            "move file",
+            "move folder",
+        )
+    ):
+        source, destination = _extract_two_paths(user_text)
+
+        return _file_plan(
+            action="file_move",
+            user_text=user_text,
+            target=destination,
+            metadata={
+                "source": source,
+                "destination": destination,
+            },
+            reason="user wants to move path with confirmation",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
+            "перейменуй файл",
+            "перейменуй папку",
+            "rename file",
+            "rename folder",
+        )
+    ):
+        path = _extract_first_path(user_text)
+        new_name = _extract_new_name(user_text)
+
+        return _file_plan(
+            action="file_rename",
+            user_text=user_text,
+            target=path,
+            metadata={
+                "path": path,
+                "new_name": new_name,
+            },
+            reason="user wants to rename path with confirmation",
+        )
+
+    if any(
+        phrase in text
+        for phrase in (
+            "видали файл",
+            "видали папку",
+            "delete file",
+            "delete folder",
+        )
+    ):
+        path = _extract_first_path(user_text)
+
+        return _file_plan(
+            action="file_delete_safe",
+            user_text=user_text,
+            target=path,
+            metadata={"path": path},
+            reason="user wants safe delete with confirmation",
+        )
+
+    if (
+        "заміни текст" in text
+        or "replace text" in text
+        or (
+            text.startswith("заміни ")
+            and " на " in text
+            and (" у файлі " in text or " в файлі " in text)
+        )
+    ):
+        
+        old_text, new_text, path = _extract_replace_parts(user_text)
+
+        return _file_plan(
+            action="file_edit_preview",
+            user_text=user_text,
+            target=path,
+            metadata={
+                "path": path,
+                "old_text": old_text,
+                "new_text": new_text,
+            },
+            reason="user wants text replace preview with confirmation",
+        )
 
     if looks_like_system_request(user_text):
         return ActionPlan(
@@ -556,6 +1075,7 @@ def decide_action(user_text: str) -> ActionPlan:
         requires_confirmation=False,
         reason="normal chat",
     )
+
 
 
 def execute_action(plan: ActionPlan, user_text: str) -> str | None:
