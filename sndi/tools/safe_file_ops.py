@@ -7,8 +7,10 @@ import os
 import shutil
 import uuid
 
-from sndi.core.app_paths import get_runtime_safe_trash_dir
-
+from sndi.core.app_paths import (
+    get_runtime_safe_trash_dir,
+    get_runtime_file_backups_dir,
+)
 
 TEXT_EXTENSIONS = {
     ".txt",
@@ -1542,6 +1544,410 @@ def execute_safe_delete_path(path: str | Path) -> FileOpResult:
             error=str(error),
         )
 
+def _sanitize_backup_filename(value: str) -> str:
+    safe = value or "file"
+
+    for char in '<>:"/\\|?*':
+        safe = safe.replace(char, "_")
+
+    safe = safe.strip().strip(".")
+
+    if not safe:
+        safe = "file"
+
+    return safe[:180]
+
+
+def _build_file_backup_destination(source_path: Path) -> Path:
+    backup_dir = get_runtime_file_backups_dir()
+    backup_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    unique = uuid.uuid4().hex[:8]
+
+    source_marker = str(source_path).replace(":", "")
+    source_marker = _sanitize_backup_filename(source_marker.replace("\\", "__").replace("/", "__"))
+
+    backup_name = f"{timestamp}_{unique}_{source_marker}.bak"
+    return backup_dir / backup_name
+
+
+def create_text_file_backup(path: str | Path) -> FileOpResult:
+    action = "file_backup"
+
+    try:
+        source_path = normalize_path(path)
+
+        if not source_path.exists():
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(source_path),
+                message=f"backup неможливий: файл не існує: {source_path}",
+                error="path_not_found",
+            )
+
+        if not source_path.is_file():
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(source_path),
+                message=f"backup неможливий: це не файл: {source_path}",
+                error="not_a_file",
+            )
+
+        backup_path = _build_file_backup_destination(source_path)
+        shutil.copy2(source_path, backup_path)
+
+        return FileOpResult(
+            ok=True,
+            action=action,
+            target=str(source_path),
+            message=f"backup створено: {backup_path}",
+            data={
+                "source": str(source_path),
+                "backup_path": str(backup_path),
+                "size": backup_path.stat().st_size,
+                "size_human": human_size(backup_path.stat().st_size),
+            },
+        )
+
+    except Exception as error:
+        return FileOpResult(
+            ok=False,
+            action=action,
+            target=str(path),
+            message=f"не змогла створити backup: {error}",
+            error=str(error),
+        )
+
+
+def execute_text_replace(
+    path: str | Path,
+    old_text: str,
+    new_text: str,
+) -> FileOpResult:
+    """
+    Execute safe text replace.
+
+    Safety:
+    - only confirmed action should call this;
+    - blocks system-sensitive paths;
+    - blocks binary files;
+    - creates backup before writing;
+    - replaces only first occurrence to match preview behavior.
+    """
+    action = "file_edit_preview"
+
+    try:
+        target = normalize_path(path)
+
+        blocked = _mutation_blocked_for_sensitive_paths(target)
+        if blocked:
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(target),
+                message=f"заблоковано: {blocked}",
+                error="sensitive_path_blocked",
+            )
+
+        if not target.exists():
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(target),
+                message=f"файл не існує: {target}",
+                error="path_not_found",
+            )
+
+        if not target.is_file():
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(target),
+                message=f"це не файл: {target}",
+                error="not_a_file",
+            )
+
+        if is_probably_binary(target):
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(target),
+                message=f"схоже, це binary-файл. text edit заблокований: {target}",
+                error="binary_file",
+            )
+
+        if not old_text:
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(target),
+                message="old_text порожній. replace заблокований.",
+                error="empty_old_text",
+            )
+
+        original = target.read_text(encoding="utf-8", errors="replace")
+
+        if old_text not in original:
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(target),
+                message="old_text не знайдено у файлі. нічого не змінено.",
+                error="old_text_not_found",
+            )
+
+        backup_result = create_text_file_backup(target)
+
+        if not backup_result.ok:
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(target),
+                message=f"edit заблокований, бо backup не створився: {backup_result.message}",
+                error="backup_failed",
+                data={
+                    "backup_error": backup_result.error,
+                },
+            )
+
+        modified = original.replace(old_text, new_text, 1)
+        target.write_text(modified, encoding="utf-8")
+
+        return FileOpResult(
+            ok=True,
+            action=action,
+            target=str(target),
+            message=(
+                "текст у файлі оновлено.\n"
+                f"Файл: {target}\n"
+                f"Backup: {backup_result.data.get('backup_path')}\n"
+                "Заміна: 1 occurrence"
+            ),
+            data={
+                "path": str(target),
+                "backup_path": backup_result.data.get("backup_path"),
+                "old_text_preview": old_text[:300],
+                "new_text_preview": new_text[:300],
+                "replace_count": 1,
+                "size": target.stat().st_size,
+                "size_human": human_size(target.stat().st_size),
+            },
+        )
+
+    except Exception as error:
+        return FileOpResult(
+            ok=False,
+            action=action,
+            target=str(path),
+            message=f"не змогла виконати text replace: {error}",
+            error=str(error),
+        )
+    
+def _sanitize_backup_filename(value: str) -> str:
+    safe = value or "file"
+
+    for char in '<>:"/\\|?*':
+        safe = safe.replace(char, "_")
+
+    safe = safe.strip().strip(".")
+
+    if not safe:
+        safe = "file"
+
+    return safe[:180]
+
+
+def _build_file_backup_destination(source_path: Path) -> Path:
+    backup_dir = get_runtime_file_backups_dir()
+    backup_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    unique = uuid.uuid4().hex[:8]
+
+    source_marker = str(source_path).replace(":", "")
+    source_marker = _sanitize_backup_filename(source_marker.replace("\\", "__").replace("/", "__"))
+
+    backup_name = f"{timestamp}_{unique}_{source_marker}.bak"
+    return backup_dir / backup_name
+
+
+def create_text_file_backup(path: str | Path) -> FileOpResult:
+    action = "file_backup"
+
+    try:
+        source_path = normalize_path(path)
+
+        if not source_path.exists():
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(source_path),
+                message=f"backup неможливий: файл не існує: {source_path}",
+                error="path_not_found",
+            )
+
+        if not source_path.is_file():
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(source_path),
+                message=f"backup неможливий: це не файл: {source_path}",
+                error="not_a_file",
+            )
+
+        backup_path = _build_file_backup_destination(source_path)
+        shutil.copy2(source_path, backup_path)
+
+        return FileOpResult(
+            ok=True,
+            action=action,
+            target=str(source_path),
+            message=f"backup створено: {backup_path}",
+            data={
+                "source": str(source_path),
+                "backup_path": str(backup_path),
+                "size": backup_path.stat().st_size,
+                "size_human": human_size(backup_path.stat().st_size),
+            },
+        )
+
+    except Exception as error:
+        return FileOpResult(
+            ok=False,
+            action=action,
+            target=str(path),
+            message=f"не змогла створити backup: {error}",
+            error=str(error),
+        )
+
+
+def execute_text_replace(
+    path: str | Path,
+    old_text: str,
+    new_text: str,
+) -> FileOpResult:
+    """
+    Execute safe text replace.
+
+    Safety:
+    - only confirmed action should call this;
+    - blocks system-sensitive paths;
+    - blocks binary files;
+    - creates backup before writing;
+    - replaces only first occurrence to match preview behavior.
+    """
+    action = "file_edit_preview"
+
+    try:
+        target = normalize_path(path)
+
+        blocked = _mutation_blocked_for_sensitive_paths(target)
+        if blocked:
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(target),
+                message=f"заблоковано: {blocked}",
+                error="sensitive_path_blocked",
+            )
+
+        if not target.exists():
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(target),
+                message=f"файл не існує: {target}",
+                error="path_not_found",
+            )
+
+        if not target.is_file():
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(target),
+                message=f"це не файл: {target}",
+                error="not_a_file",
+            )
+
+        if is_probably_binary(target):
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(target),
+                message=f"схоже, це binary-файл. text edit заблокований: {target}",
+                error="binary_file",
+            )
+
+        if not old_text:
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(target),
+                message="old_text порожній. replace заблокований.",
+                error="empty_old_text",
+            )
+
+        original = target.read_text(encoding="utf-8", errors="replace")
+
+        if old_text not in original:
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(target),
+                message="old_text не знайдено у файлі. нічого не змінено.",
+                error="old_text_not_found",
+            )
+
+        backup_result = create_text_file_backup(target)
+
+        if not backup_result.ok:
+            return FileOpResult(
+                ok=False,
+                action=action,
+                target=str(target),
+                message=f"edit заблокований, бо backup не створився: {backup_result.message}",
+                error="backup_failed",
+                data={
+                    "backup_error": backup_result.error,
+                },
+            )
+
+        modified = original.replace(old_text, new_text, 1)
+        target.write_text(modified, encoding="utf-8")
+
+        return FileOpResult(
+            ok=True,
+            action=action,
+            target=str(target),
+            message=(
+                "текст у файлі оновлено.\n"
+                f"Файл: {target}\n"
+                f"Backup: {backup_result.data.get('backup_path')}\n"
+                "Заміна: 1 occurrence"
+            ),
+            data={
+                "path": str(target),
+                "backup_path": backup_result.data.get("backup_path"),
+                "old_text_preview": old_text[:300],
+                "new_text_preview": new_text[:300],
+                "replace_count": 1,
+                "size": target.stat().st_size,
+                "size_human": human_size(target.stat().st_size),
+            },
+        )
+
+    except Exception as error:
+        return FileOpResult(
+            ok=False,
+            action=action,
+            target=str(path),
+            message=f"не змогла виконати text replace: {error}",
+            error=str(error),
+        )
+
 
 def execute_file_mutation(action: str, params: dict[str, Any] | None = None) -> FileOpResult:
     """
@@ -1583,15 +1989,10 @@ def execute_file_mutation(action: str, params: dict[str, Any] | None = None) -> 
         return execute_safe_delete_path(params.get("path", ""))
 
     if action == "file_edit_preview":
-        return FileOpResult(
-            ok=False,
-            action=action,
-            target=str(params.get("path", "")),
-            message=(
-                "text edit execution ще не підключений.\n"
-                "Це буде Stage 13: backup + safe replace."
-            ),
-            error="text_edit_executor_deferred_stage_13",
+        return execute_text_replace(
+            path=params.get("path", ""),
+            old_text=params.get("old_text", ""),
+            new_text=params.get("new_text", ""),
         )
 
     return FileOpResult(
